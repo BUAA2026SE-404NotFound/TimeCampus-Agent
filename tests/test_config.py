@@ -1,7 +1,8 @@
 from timecampus_agent.config import load_settings
 
 
-def test_load_settings_uses_defaults(monkeypatch) -> None:
+def test_load_settings_uses_defaults(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
     for name in [
         "TIMECAMPUS_API_BASE_URL",
         "TIMECAMPUS_CHAT_BASE_URL",

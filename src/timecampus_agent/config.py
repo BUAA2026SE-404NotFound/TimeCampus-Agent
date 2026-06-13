@@ -21,7 +21,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    load_dotenv()
+    load_dotenv(dotenv_path=".env")
     return Settings(
         api_base_url=_env("TIMECAMPUS_API_BASE_URL", "http://127.0.0.1:8080/api/v1"),
         admin_username=_optional_env("TIMECAMPUS_ADMIN_USERNAME"),
