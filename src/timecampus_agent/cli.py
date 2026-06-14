@@ -40,8 +40,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "ask":
         executor = create_agent_executor(settings)
-        result = executor.invoke({"input": args.prompt})
-        console.print(result.get("output", result))
+        result = executor.invoke({"messages": [{"role": "user", "content": args.prompt}]})
+        console.print(_extract_agent_output(result))
         return 0
 
     client = TimeCampusBackendClient(settings.api_base_url, admin_token=settings.admin_token)
@@ -78,6 +78,21 @@ def parse_points(value: str) -> list[RoutePoint]:
 
 def _print_json(value: object) -> None:
     console.print_json(json.dumps(value, ensure_ascii=False))
+
+
+def _extract_agent_output(result: object) -> object:
+    if not isinstance(result, dict):
+        return result
+    messages = result.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return result
+    last_message = messages[-1]
+    content = getattr(last_message, "content", None)
+    if content is not None:
+        return content
+    if isinstance(last_message, dict):
+        return last_message.get("content", result)
+    return result
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ class McpStreamableHttpClient:
                 "params": {
                     "protocolVersion": "2025-03-26",
                     "capabilities": {},
-                    "clientInfo": {"name": "timecampus-agent", "version": "0.1.0"},
+                    "clientInfo": {"name": "timecampus-agent", "version": "0.3.0-beta"},
                 },
             },
             include_session=False,

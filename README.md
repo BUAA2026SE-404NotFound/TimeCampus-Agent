@@ -2,6 +2,8 @@
 
 TimeCampus Agent 是“时光航迹”的独立 Python/LangChain 子模块，用于后台维护、RAG 检索、草案生成、MCP 工具发现和游客步行路线辅助。Agent 编排刻意放在 Portal 之外，前端保持纯 UI 客户端，Agent 通过 Backend REST API 和 `/mcp` 与系统交互。
 
+当前模块版本：`0.3.0-beta`。
+
 ## 环境准备
 
 ```powershell

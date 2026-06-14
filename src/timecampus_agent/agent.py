@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from typing import Any
+
+from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 
 from timecampus_agent.backend import TimeCampusBackendClient
@@ -17,7 +18,7 @@ or uncertain actions, produce a review plan instead of executing writes.
 """
 
 
-def create_agent_executor(settings: Settings | None = None) -> AgentExecutor:
+def create_agent_executor(settings: Settings | None = None) -> Any:
     settings = settings or load_settings()
     if not settings.chat_api_key:
         raise RuntimeError("TIMECAMPUS_CHAT_API_KEY is required to run the LangChain agent.")
@@ -33,12 +34,8 @@ def create_agent_executor(settings: Settings | None = None) -> AgentExecutor:
         temperature=settings.chat_temperature,
     )
     tools = build_backend_tools(client)
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", SYSTEM_PROMPT),
-            ("human", "{input}"),
-            MessagesPlaceholder("agent_scratchpad"),
-        ]
+    return create_agent(
+        model=llm,
+        tools=tools,
+        system_prompt=SYSTEM_PROMPT,
     )
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    return AgentExecutor(agent=agent, tools=tools, verbose=True)
