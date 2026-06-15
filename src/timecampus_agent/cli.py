@@ -10,7 +10,7 @@ from rich.console import Console
 from timecampus_agent.agent import create_agent_executor
 from timecampus_agent.backend import RoutePoint, TimeCampusBackendClient
 from timecampus_agent.config import load_settings
-from timecampus_agent.mcp_client import list_timecampus_mcp_tool_names
+from timecampus_agent.mcp_client import call_timecampus_mcp_tool, list_timecampus_mcp_tool_names
 
 console = Console()
 
@@ -44,8 +44,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         console.print(_extract_agent_output(result))
         return 0
 
+    if args.command == "rag-search" and settings.mcp_token:
+        result = asyncio.run(
+            call_timecampus_mcp_tool(
+                "timecampus_rag_search",
+                {
+                    "query": args.query,
+                    "limit": args.limit,
+                    "types": ["poi", "media", "comment", "guideline"],
+                    "includePending": True,
+                },
+                settings,
+            )
+        )
+        _print_json(_extract_mcp_tool_result(result))
+        return 0
+
     client = TimeCampusBackendClient(settings.api_base_url, admin_token=settings.admin_token)
-    if args.command in {"rag-search", "draft"} and not client.admin_token:
+    if args.command == "draft" and not client.admin_token:
         if settings.admin_username and settings.admin_password:
             client.login(settings.admin_username, settings.admin_password)
         else:
@@ -92,6 +108,32 @@ def _extract_agent_output(result: object) -> object:
         return content
     if isinstance(last_message, dict):
         return last_message.get("content", result)
+    return result
+
+
+def _extract_mcp_tool_result(payload: object) -> object:
+    if not isinstance(payload, dict):
+        return payload
+    result = payload.get("result", payload)
+    if not isinstance(result, dict):
+        return result
+    structured = result.get("structuredContent")
+    if structured is not None:
+        return structured
+    content = result.get("content")
+    if isinstance(content, list):
+        texts = [
+            item.get("text")
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text" and item.get("text")
+        ]
+        if len(texts) == 1:
+            try:
+                return json.loads(str(texts[0]))
+            except json.JSONDecodeError:
+                return {"text": texts[0]}
+        if texts:
+            return {"text": "\n".join(str(text) for text in texts)}
     return result
 
 

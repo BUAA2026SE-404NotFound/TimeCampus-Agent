@@ -60,6 +60,22 @@ class McpStreamableHttpClient:
             if isinstance(tool, dict) and tool.get("name")
         ]
 
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if not self.session_id:
+            await self.initialize()
+        return await self._request(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "arguments": arguments,
+                },
+            },
+            include_session=True,
+        )
+
     async def _request(self, payload: dict[str, Any], include_session: bool) -> dict[str, Any]:
         headers = {
             "Accept": "application/json, text/event-stream",
@@ -94,6 +110,15 @@ async def list_timecampus_mcp_tool_names(settings: Settings | None = None) -> li
     client = build_mcp_client(settings)
     tools = await client.list_tools()
     return [tool.name for tool in tools]
+
+
+async def call_timecampus_mcp_tool(
+    name: str,
+    arguments: dict[str, Any],
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    client = build_mcp_client(settings)
+    return await client.call_tool(name, arguments)
 
 
 def _try_parse_streamable_payload(text: str) -> dict[str, Any] | None:
