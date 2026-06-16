@@ -10,6 +10,7 @@ from rich.console import Console
 from timecampus_agent.agent import create_agent_executor
 from timecampus_agent.backend import RoutePoint, TimeCampusBackendClient
 from timecampus_agent.config import load_settings
+from timecampus_agent.evaluation.cli import handle_eval_command, register_eval_commands
 from timecampus_agent.mcp_client import call_timecampus_mcp_tool, list_timecampus_mcp_tool_names
 
 console = Console()
@@ -34,9 +35,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     route_parser.add_argument("points", help="Semicolon-separated name,lat,lng points.")
 
     subparsers.add_parser("mcp-tools", help="List tools from the backend MCP server.")
+    register_eval_commands(subparsers)
 
     args = parser.parse_args(argv)
     settings = load_settings()
+
+    if args.command == "eval":
+        return handle_eval_command(args, settings, console)
 
     if args.command == "ask":
         executor = create_agent_executor(settings)

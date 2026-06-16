@@ -17,3 +17,4 @@ def test_load_settings_uses_defaults(monkeypatch, tmp_path) -> None:
     assert settings.chat_base_url == "https://api.deepseek.com/v1"
     assert settings.chat_model == "deepseek-chat"
     assert settings.mcp_url == "http://127.0.0.1:8080/mcp"
+    assert settings.eval_llm_enabled is False

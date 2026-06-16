@@ -17,6 +17,7 @@ def test_build_mcp_client_registers_timecampus_connection() -> None:
         chat_temperature=0.2,
         mcp_url="http://mcp.example.test/mcp",
         mcp_token="token",
+        eval_llm_enabled=False,
     )
 
     client = build_mcp_client(settings)

@@ -18,6 +18,7 @@ class Settings:
     chat_temperature: float
     mcp_url: str
     mcp_token: str | None
+    eval_llm_enabled: bool
 
 
 def load_settings() -> Settings:
@@ -33,6 +34,7 @@ def load_settings() -> Settings:
         chat_temperature=float(_env("TIMECAMPUS_CHAT_TEMPERATURE", "0.2")),
         mcp_url=_env("TIMECAMPUS_MCP_URL", "http://127.0.0.1:8080/mcp"),
         mcp_token=_optional_env("TIMECAMPUS_MCP_TOKEN"),
+        eval_llm_enabled=_bool_env("TIMECAMPUS_EVAL_LLM_ENABLED", False),
     )
 
 
@@ -44,3 +46,10 @@ def _env(name: str, default: str) -> str:
 def _optional_env(name: str) -> str | None:
     value = os.getenv(name)
     return value.strip() if value and value.strip() else None
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
