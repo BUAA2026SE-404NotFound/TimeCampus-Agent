@@ -80,6 +80,18 @@ class TimeCampusBackendClient:
     def walking_route(self, points: Iterable[RoutePoint]) -> dict[str, Any]:
         return self._post("/map/walking-route", {"points": [point.model_dump() for point in points]})
 
+    def search_public_pois(self, keyword: str | None = None) -> list[dict[str, Any]]:
+        response = self._client.get(
+            f"{self.base_url}/pois",
+            params={"keyword": keyword} if keyword else None,
+            headers={"Content-Type": "application/json"},
+        )
+        response.raise_for_status()
+        data = self._unwrap_value(response.json(), "/pois")
+        if not isinstance(data, list):
+            raise BackendError("/pois returned non-list data")
+        return [item for item in data if isinstance(item, dict)]
+
     def _post_admin(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.admin_token:
             raise BackendError("Admin token is required. Login first or set TIMECAMPUS_ADMIN_TOKEN.")
@@ -94,11 +106,14 @@ class TimeCampusBackendClient:
         return self._unwrap(response.json(), path)
 
     def _unwrap(self, payload: Any, path: str) -> dict[str, Any]:
+        data = self._unwrap_value(payload, path)
+        if not isinstance(data, dict):
+            raise BackendError(f"{path} returned non-object data")
+        return data
+
+    def _unwrap_value(self, payload: Any, path: str) -> Any:
         if not isinstance(payload, dict):
             raise BackendError(f"{path} returned a non-object response")
         if "code" in payload and payload["code"] != 0:
             raise BackendError(f"{path} failed: code={payload.get('code')} message={payload.get('message')}")
-        data = payload.get("data", payload)
-        if not isinstance(data, dict):
-            raise BackendError(f"{path} returned non-object data")
-        return data
+        return payload.get("data", payload)

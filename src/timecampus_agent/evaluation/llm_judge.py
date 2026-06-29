@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from langchain_openai import ChatOpenAI
+from langchain_deepseek import ChatDeepSeek
 
 from timecampus_agent.config import Settings
 from timecampus_agent.evaluation.models import AgentTrace, EvalCase
@@ -12,7 +12,7 @@ from timecampus_agent.evaluation.models import AgentTrace, EvalCase
 def score_with_llm_judge(settings: Settings, case: EvalCase, trace: AgentTrace) -> dict[str, float]:
     if not settings.eval_llm_enabled or not settings.chat_api_key:
         return {}
-    llm = ChatOpenAI(
+    llm = ChatDeepSeek(
         api_key=settings.chat_api_key,
         base_url=settings.chat_base_url,
         model=settings.chat_model,

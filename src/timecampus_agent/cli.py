@@ -20,8 +20,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="timecampus-agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    ask_parser = subparsers.add_parser("ask", help="Run the LangChain agent.")
+    ask_parser = subparsers.add_parser("ask", help="Run the LangGraph agent.")
     ask_parser.add_argument("prompt")
+    ask_parser.add_argument("--agent", choices=["auto", "operations", "guide"], default="auto")
 
     search_parser = subparsers.add_parser("rag-search", help="Search backend RAG context.")
     search_parser.add_argument("query")
@@ -35,6 +36,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     route_parser.add_argument("points", help="Semicolon-separated name,lat,lng points.")
 
     subparsers.add_parser("mcp-tools", help="List tools from the backend MCP server.")
+    serve_parser = subparsers.add_parser("serve", help="Run the local Agent HTTP service.")
+    serve_parser.add_argument("--host")
+    serve_parser.add_argument("--port", type=int)
     register_eval_commands(subparsers)
 
     args = parser.parse_args(argv)
@@ -43,8 +47,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "eval":
         return handle_eval_command(args, settings, console)
 
+    if args.command == "serve":
+        if not settings.agent_api_token:
+            raise SystemExit("TIMECAMPUS_AGENT_API_TOKEN is required.")
+        import uvicorn
+
+        from timecampus_agent.service import create_app
+
+        uvicorn.run(
+            create_app(settings),
+            host=args.host or settings.agent_api_host,
+            port=args.port or settings.agent_api_port,
+        )
+        return 0
+
     if args.command == "ask":
-        executor = create_agent_executor(settings)
+        executor = create_agent_executor(settings, default_agent=args.agent)
         result = executor.invoke({"messages": [{"role": "user", "content": args.prompt}]})
         console.print(_extract_agent_output(result))
         return 0

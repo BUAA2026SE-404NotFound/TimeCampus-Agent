@@ -29,7 +29,15 @@ class WalkingRouteInput(BaseModel):
     points: list[RoutePoint] = Field(min_length=2, max_length=8)
 
 
+class PublicPoiSearchInput(BaseModel):
+    keyword: str | None = Field(default=None, description="Optional public POI keyword.")
+
+
 def build_backend_tools(client: TimeCampusBackendClient) -> list[StructuredTool]:
+    return [*build_operations_tools(client), *build_guide_tools(client)]
+
+
+def build_operations_tools(client: TimeCampusBackendClient) -> list[StructuredTool]:
     def rag_search(
         query: Annotated[str, "Maintenance or copy-editing query."],
         limit: int = 6,
@@ -50,10 +58,6 @@ def build_backend_tools(client: TimeCampusBackendClient) -> list[StructuredTool]
         result = client.agent_draft(task, limit, types, poi_id, include_pending)
         return _json(result)
 
-    def walking_route(points: list[RoutePoint]) -> str:
-        result = client.walking_route(points)
-        return _json(result)
-
     return [
         StructuredTool.from_function(
             name="timecampus_rag_search",
@@ -66,6 +70,25 @@ def build_backend_tools(client: TimeCampusBackendClient) -> list[StructuredTool]
             description="Ask the backend to produce a grounded maintenance draft and quality gate.",
             func=admin_draft,
             args_schema=DraftInput,
+        ),
+    ]
+
+
+def build_guide_tools(client: TimeCampusBackendClient) -> list[StructuredTool]:
+    def public_poi_search(keyword: str | None = None) -> str:
+        result = client.search_public_pois(keyword)
+        return _json({"pois": result, "count": len(result)})
+
+    def walking_route(points: list[RoutePoint]) -> str:
+        result = client.walking_route(points)
+        return _json(result)
+
+    return [
+        StructuredTool.from_function(
+            name="timecampus_public_poi_search",
+            description="Search public, published TimeCampus POIs before planning a visitor route.",
+            func=public_poi_search,
+            args_schema=PublicPoiSearchInput,
         ),
         StructuredTool.from_function(
             name="timecampus_walking_route",

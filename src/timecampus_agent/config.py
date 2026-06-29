@@ -19,6 +19,12 @@ class Settings:
     mcp_url: str
     mcp_token: str | None
     eval_llm_enabled: bool
+    agent_api_token: str | None = None
+    agent_api_host: str = "127.0.0.1"
+    agent_api_port: int = 8090
+    eval_report_dir: str = "eval-reports"
+    memory_dir: str = "data/agent-memory"
+    session_history_limit: int = 40
 
 
 def load_settings() -> Settings:
@@ -35,6 +41,12 @@ def load_settings() -> Settings:
         mcp_url=_env("TIMECAMPUS_MCP_URL", "http://127.0.0.1:8080/mcp"),
         mcp_token=_optional_env("TIMECAMPUS_MCP_TOKEN"),
         eval_llm_enabled=_bool_env("TIMECAMPUS_EVAL_LLM_ENABLED", False),
+        agent_api_token=_optional_env("TIMECAMPUS_AGENT_API_TOKEN"),
+        agent_api_host=_env("TIMECAMPUS_AGENT_API_HOST", "127.0.0.1"),
+        agent_api_port=int(_env("TIMECAMPUS_AGENT_API_PORT", "8090")),
+        eval_report_dir=_env("TIMECAMPUS_EVAL_REPORT_DIR", "eval-reports"),
+        memory_dir=_env("TIMECAMPUS_AGENT_MEMORY_DIR", "data/agent-memory"),
+        session_history_limit=int(_env("TIMECAMPUS_AGENT_SESSION_HISTORY_LIMIT", "40")),
     )
 
 
