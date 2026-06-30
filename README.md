@@ -51,7 +51,7 @@ uv run timecampus-agent draft "为主楼补充面向游客的简介"
 uv run timecampus-agent ask "检索主楼资料并给出维护计划"
 uv run timecampus-agent ask --agent guide "主楼到图书馆怎么走？"
 uv run timecampus-agent mcp-tools
-uv run timecampus-agent eval run --suite all --mode fixture --report-dir eval-reports
+uv run timecampus-agent eval run --suite all --mode fixture --repetitions 2 --report-dir eval-reports
 uv run timecampus-agent serve
 ```
 
@@ -84,24 +84,26 @@ uv run timecampus-agent route "主楼,39.981,116.34;图书馆,39.982,116.341"
 - `AgentTrace`：运行轨迹，包含 output、toolCalls、retrievedDocs、routePlan、latencyMs 和 error。
 - `EvalResult`：评分结果，包含 metrics、overall、passed、failureReasons 和 badCaseTags。
 
-默认 fixture 模式不访问网络，适合 CI：
+评测用例来自版本化 `evaluation/cases.jsonl`。默认 fixture 模式不访问网络，适合 CI：
 
 ```powershell
 uv run timecampus-agent eval list
-uv run timecampus-agent eval run --suite all --mode fixture --report-dir eval-reports --min-pass-rate 0.85 --min-overall 80
+uv run timecampus-agent eval run --suite all --mode fixture --repetitions 2 --report-dir eval-reports --min-pass-rate 0.85 --min-overall 80 --min-consistency 0.80
 ```
 
 Backend 启动后可以运行 live 模式：
 
 ```powershell
-uv run timecampus-agent eval run --suite maintenance --mode live
-uv run timecampus-agent eval run --suite guide --mode live
+uv run timecampus-agent eval run --suite maintenance --mode live --repetitions 3
+uv run timecampus-agent eval run --suite guide --mode live --repetitions 3
 ```
 
 报告输出：
 
 - `eval-reports/eval-report.json`：CI 和机器解析。
 - `eval-reports/eval-report.md`：面试展示、Bad Case 复盘和人工评审。
+- `eval-reports/runs/*.json`：最近 20 次运行，可用于版本对比。
+- `eval-reports/bad-cases.jsonl`：append-only Bad Case 生命周期。
 
 可选 LLM-as-judge：
 
@@ -155,7 +157,7 @@ Agent 运行应遵守 Backend MCP Server 的相同规则：
 ```powershell
 uv run pytest
 uv run ruff check .
-uv run timecampus-agent eval run --suite all --mode fixture --report-dir eval-reports --min-pass-rate 0.85 --min-overall 80
+uv run timecampus-agent eval run --suite all --mode fixture --repetitions 2 --report-dir eval-reports --min-pass-rate 0.85 --min-overall 80 --min-consistency 0.80
 ```
 
 根仓库 API 冒烟：

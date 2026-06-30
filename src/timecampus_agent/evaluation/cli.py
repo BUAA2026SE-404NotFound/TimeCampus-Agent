@@ -25,6 +25,9 @@ def register_eval_commands(subparsers) -> None:
     run_parser.add_argument("--report-dir", default="eval-reports")
     run_parser.add_argument("--min-pass-rate", type=float, default=0.85)
     run_parser.add_argument("--min-overall", type=float, default=80)
+    run_parser.add_argument("--min-consistency", type=float, default=0.8)
+    run_parser.add_argument("--repetitions", type=int, choices=range(1, 6), default=1)
+    run_parser.add_argument("--case-id", action="append", dest="case_ids")
 
 
 def handle_eval_command(args: Namespace, settings: Settings, console: Console) -> int:
@@ -39,6 +42,9 @@ def handle_eval_command(args: Namespace, settings: Settings, console: Console) -
             mode=args.mode,
             min_pass_rate=args.min_pass_rate,
             min_overall=args.min_overall,
+            min_consistency=args.min_consistency,
+            repetitions=args.repetitions,
+            case_ids=args.case_ids,
         )
         json_path, markdown_path = write_eval_report(summary, Path(args.report_dir))
         console.print_json(
@@ -51,16 +57,15 @@ def handle_eval_command(args: Namespace, settings: Settings, console: Console) -
                     "failed": summary.failed,
                     "passRate": summary.pass_rate,
                     "averageOverall": summary.average_overall,
+                    "consistencyRate": summary.consistency_rate,
+                    "p95LatencyMs": summary.p95_latency_ms,
+                    "gatePassed": summary.gate_passed,
                     "jsonReport": str(json_path),
                     "markdownReport": str(markdown_path),
                 },
                 ensure_ascii=False,
             )
         )
-        gate_passed = (
-            summary.pass_rate >= args.min_pass_rate
-            and summary.average_overall >= args.min_overall
-        )
-        return 0 if gate_passed else 1
+        return 0 if summary.gate_passed else 1
 
     raise ValueError(f"Unknown eval command: {args.eval_command}")

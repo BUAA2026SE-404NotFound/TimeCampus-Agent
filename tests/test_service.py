@@ -169,8 +169,8 @@ def test_fixture_eval_api_writes_latest_report(tmp_path) -> None:
                 json={"suite": "all", "mode": "fixture"},
             )
             assert response.status_code == 200
-            assert response.json()["total"] == 9
-            assert response.json()["passed"] == 9
+            assert response.json()["total"] == 15
+            assert response.json()["passed"] == 15
 
     asyncio.run(check())
     assert (tmp_path / "eval-report.json").exists()
@@ -201,6 +201,65 @@ def test_session_api_lists_history_and_streams_sse(tmp_path) -> None:
             assert "event: delta" in payload
             assert '"content": "已查询"' in payload
             assert "event: result" in payload
+
+    asyncio.run(check())
+
+
+def test_eval_stream_history_and_bad_case_api(tmp_path) -> None:
+    settings = replace(
+        load_settings(),
+        agent_api_token="test-token",
+        eval_report_dir=str(tmp_path),
+    )
+
+    async def check() -> None:
+        headers = {"X-TimeCampus-Agent-Token": "test-token"}
+        async with _client(settings) as client:
+            async with client.stream(
+                "POST",
+                "/internal/v1/evals/runs/stream",
+                headers=headers,
+                json={
+                    "suite": "guide",
+                    "mode": "fixture",
+                    "repetitions": 2,
+                    "caseIds": ["guide-route-two-points"],
+                },
+            ) as response:
+                payload = (await response.aread()).decode()
+            assert "event: started" in payload
+            assert payload.count("event: case") == 2
+            assert "event: result" in payload
+
+            history = await client.get("/internal/v1/evals/runs", headers=headers)
+            run_id = history.json()["runs"][0]["runId"]
+            detail = await client.get(
+                f"/internal/v1/evals/runs/{run_id}",
+                headers=headers,
+            )
+            assert detail.json()["repetitions"] == 2
+
+            created = await client.post(
+                "/internal/v1/evals/bad-cases",
+                headers=headers,
+                json={
+                    "runId": run_id,
+                    "caseId": "guide-route-two-points",
+                    "note": "回归检查",
+                },
+            )
+            bad_case_id = created.json()["id"]
+            resolved = await client.patch(
+                f"/internal/v1/evals/bad-cases/{bad_case_id}",
+                headers=headers,
+                json={"status": "resolved", "resolution": "已处理"},
+            )
+            assert resolved.json()["status"] == "resolved"
+            bad_cases = await client.get(
+                "/internal/v1/evals/bad-cases?status=resolved",
+                headers=headers,
+            )
+            assert bad_cases.json()["badCases"][0]["resolution"] == "已处理"
 
     asyncio.run(check())
 

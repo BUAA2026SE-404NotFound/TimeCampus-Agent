@@ -10,44 +10,26 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
-from langchain.agents import create_agent
-from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_deepseek import ChatDeepSeek
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from timecampus_agent.agent import OPERATIONS_PROMPT
 from timecampus_agent.config import Settings, load_settings
-from timecampus_agent.evaluation.cases import case_catalog
+from timecampus_agent.evaluation.cases import case_catalog, load_eval_cases
 from timecampus_agent.evaluation.models import EvalMode
 from timecampus_agent.evaluation.reports import write_eval_report
 from timecampus_agent.evaluation.runner import EvalRunner
+from timecampus_agent.evaluation.store import EvalStore
 from timecampus_agent.memory import SessionStore
-
-BLOCKED_TOOLS = {"timecampus_delete_poi", "timecampus_delete_media"}
-READ_ONLY_TOOLS = {
-    "timecampus_search_pois",
-    "timecampus_get_poi",
-    "timecampus_list_media",
-    "timecampus_get_media",
-    "timecampus_rag_search",
-    "timecampus_rag_context_pack",
-    "timecampus_rag_corpus_summary",
-    "timecampus_public_poi_search",
-    "timecampus_walking_route",
-}
-
-EXECUTION_PROMPT = (
-    OPERATIONS_PROMPT
-    + """
-Use MCP read tools before any write. Never call deletion tools. A write may only
-run after an administrator approves the exact tool name and arguments. Keep the
-final response concise and list the records changed.
-"""
+from timecampus_agent.operations_runtime import (
+    build_operations_mcp_agent,
+    tool_policy as _tool_policy,
 )
+
+
+def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:
+    return _tool_policy(tools)
 
 
 class OperationRunRequest(BaseModel):
@@ -74,23 +56,28 @@ class OperationDecisionRequest(BaseModel):
 
 
 class EvalRunRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     suite: Literal["all", "maintenance", "guide"] = "all"
     mode: EvalMode = "fixture"
     min_pass_rate: float = Field(default=0.85, ge=0, le=1)
     min_overall: float = Field(default=80, ge=0, le=100)
+    min_consistency: float = Field(default=0.8, ge=0, le=1)
+    repetitions: int = Field(default=1, ge=1, le=5)
+    case_ids: list[str] | None = Field(default=None, alias="caseIds", max_length=50)
 
 
-def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:
-    allowed = [tool for tool in tools if tool.name not in BLOCKED_TOOLS]
-    interrupt_on = {
-        tool.name: (
-            False
-            if tool.name in READ_ONLY_TOOLS
-            else {"allowed_decisions": ["approve", "reject"]}
-        )
-        for tool in allowed
-    }
-    return allowed, interrupt_on
+class BadCaseCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    run_id: str = Field(alias="runId")
+    case_id: str = Field(alias="caseId")
+    note: str = Field(default="", max_length=1000)
+
+
+class BadCaseUpdateRequest(BaseModel):
+    status: Literal["open", "resolved"]
+    resolution: str = Field(default="", max_length=2000)
 
 
 class AgentRuntime:
@@ -283,51 +270,13 @@ class AgentRuntime:
         async with self._lock:
             if self._agent is not None:
                 return self._agent
-            if not self.settings.chat_api_key:
-                raise HTTPException(
-                    status_code=503,
-                    detail="TIMECAMPUS_CHAT_API_KEY is not configured.",
+            try:
+                self._agent, self._client = await build_operations_mcp_agent(
+                    self.settings,
+                    memory_context=self.sessions.memory_context(),
                 )
-            headers = (
-                {"X-TimeCampus-MCP-Token": self.settings.mcp_token}
-                if self.settings.mcp_token
-                else {}
-            )
-            self._client = MultiServerMCPClient(
-                {
-                    "timecampus": {
-                        "transport": "http",
-                        "url": self.settings.mcp_url,
-                        "headers": headers,
-                    }
-                }
-            )
-            tools, interrupt_on = tool_policy(await self._client.get_tools())
-            if not tools:
-                raise HTTPException(status_code=503, detail="Backend MCP returned no tools.")
-            model = ChatDeepSeek(
-                api_key=self.settings.chat_api_key,
-                base_url=self.settings.chat_base_url,
-                model=self.settings.chat_model,
-                temperature=self.settings.chat_temperature,
-            )
-            memory = self.sessions.memory_context()
-            prompt = EXECUTION_PROMPT
-            if memory:
-                prompt += f"\n\n# Persistent operator memory\n{memory}"
-            self._agent = create_agent(
-                model=model,
-                tools=tools,
-                system_prompt=prompt,
-                middleware=[
-                    HumanInTheLoopMiddleware(
-                        interrupt_on=interrupt_on,
-                        description_prefix="TimeCampus write requires administrator approval",
-                    )
-                ],
-                checkpointer=InMemorySaver(),
-                name="operations_executor",
-            )
+            except RuntimeError as exception:
+                raise HTTPException(status_code=503, detail=str(exception)) from exception
             return self._agent
 
     def _serialize(
@@ -360,6 +309,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or load_settings()
     runtime = runtime or AgentRuntime(settings)
+    eval_store = EvalStore(Path(settings.eval_report_dir))
     app = FastAPI(title="TimeCampus Agent", version="0.3.0-beta")
 
     def authorize(
@@ -447,11 +397,127 @@ def create_app(
             request.mode,
             request.min_pass_rate,
             request.min_overall,
+            request.min_consistency,
+            request.repetitions,
+            request.case_ids,
         )
         await asyncio.to_thread(write_eval_report, summary, Path(settings.eval_report_dir))
+        await asyncio.to_thread(eval_store.save, summary)
         return jsonable_encoder(summary.model_dump(by_alias=True))
 
+    @app.post(
+        "/internal/v1/evals/runs/stream",
+        dependencies=[Depends(authorize)],
+    )
+    async def stream_eval(request: EvalRunRequest) -> StreamingResponse:
+        return _stream_response(_eval_events(settings, eval_store, request))
+
+    @app.get("/internal/v1/evals/runs", dependencies=[Depends(authorize)])
+    async def list_eval_runs(limit: int = 20) -> dict[str, Any]:
+        return {"runs": eval_store.list_runs(max(1, min(limit, 20)))}
+
+    @app.get(
+        "/internal/v1/evals/runs/{run_id}",
+        dependencies=[Depends(authorize)],
+    )
+    async def get_eval_run(run_id: str) -> dict[str, Any]:
+        try:
+            run = eval_store.get_run(run_id)
+        except ValueError as exception:
+            raise HTTPException(status_code=400, detail=str(exception)) from exception
+        if not run:
+            raise HTTPException(status_code=404, detail="Eval run not found.")
+        return run
+
+    @app.get("/internal/v1/evals/bad-cases", dependencies=[Depends(authorize)])
+    async def list_bad_cases(
+        status: Literal["all", "open", "resolved"] = "all",
+    ) -> dict[str, Any]:
+        return {"badCases": eval_store.list_bad_cases(status)}
+
+    @app.post("/internal/v1/evals/bad-cases", dependencies=[Depends(authorize)])
+    async def create_bad_case(request: BadCaseCreateRequest) -> dict[str, Any]:
+        try:
+            return eval_store.add_bad_case(request.run_id, request.case_id, request.note)
+        except KeyError as exception:
+            raise HTTPException(status_code=404, detail=str(exception)) from exception
+        except ValueError as exception:
+            raise HTTPException(status_code=400, detail=str(exception)) from exception
+
+    @app.patch(
+        "/internal/v1/evals/bad-cases/{bad_case_id}",
+        dependencies=[Depends(authorize)],
+    )
+    async def update_bad_case(
+        bad_case_id: str,
+        request: BadCaseUpdateRequest,
+    ) -> dict[str, Any]:
+        try:
+            return eval_store.update_bad_case(
+                bad_case_id,
+                request.status,
+                request.resolution,
+            )
+        except KeyError as exception:
+            raise HTTPException(status_code=404, detail=str(exception)) from exception
+        except ValueError as exception:
+            raise HTTPException(status_code=400, detail=str(exception)) from exception
+
     return app
+
+
+async def _eval_events(
+    settings: Settings,
+    store: EvalStore,
+    request: EvalRunRequest,
+) -> AsyncIterator[tuple[str, Any]]:
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+    def progress(completed: int, total: int, result: Any) -> None:
+        loop.call_soon_threadsafe(
+            queue.put_nowait,
+            (
+                "case",
+                {
+                    "completed": completed,
+                    "total": total,
+                    "result": result.model_dump(by_alias=True),
+                },
+            ),
+        )
+
+    async def execute() -> Any:
+        return await asyncio.to_thread(
+            EvalRunner(settings).run,
+            request.suite,
+            request.mode,
+            request.min_pass_rate,
+            request.min_overall,
+            request.min_consistency,
+            request.repetitions,
+            request.case_ids,
+            progress,
+        )
+
+    total = len(load_eval_cases(request.suite, request.case_ids)) * request.repetitions
+    yield "started", {
+        "suite": request.suite,
+        "mode": request.mode,
+        "repetitions": request.repetitions,
+        "total": total,
+    }
+    task = asyncio.create_task(execute())
+    while not task.done() or not queue.empty():
+        try:
+            yield await asyncio.wait_for(queue.get(), timeout=0.2)
+        except TimeoutError:
+            continue
+    summary = await task
+    await asyncio.to_thread(write_eval_report, summary, Path(settings.eval_report_dir))
+    await asyncio.to_thread(store.save, summary)
+    yield "result", summary.model_dump(by_alias=True)
+    yield "done", {"status": "completed", "gatePassed": summary.gate_passed}
 
 
 def _stream_response(events: AsyncIterator[tuple[str, Any]]) -> StreamingResponse:

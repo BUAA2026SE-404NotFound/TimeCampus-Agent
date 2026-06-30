@@ -72,6 +72,28 @@ flowchart TD
     Persist --> Result["完成并返回工具轨迹"]
 ```
 
+Agent Eval 使用独立运行状态图，不复用 Fixture 冒充 Live：
+
+```mermaid
+flowchart TD
+    Request["suite / mode / repetitions / caseIds"] --> Load["加载 cases.jsonl"]
+    Load --> Attempt["按 case 与 repetition 执行"]
+    Attempt -->|fixture| Fixture["读取固定 trace"]
+    Attempt -->|live maintenance| OpsLive["DeepSeek + operations_executor + MCP"]
+    Attempt -->|live guide| GuideLive["DeepSeek + guide_agent + POI/route tools"]
+    OpsLive --> HITL{"是否提出写操作"}
+    HITL -->|yes| Paused["记录 HITL interrupt，不自动批准"]
+    HITL -->|no| Score["确定性评分"]
+    Paused --> Score
+    Fixture --> Score
+    GuideLive --> Score
+    Score --> Repeat{"仍有重复或用例"}
+    Repeat -->|yes| Attempt
+    Repeat -->|no| Gate["通过率 + 平均分 + 一致性 + 高风险门禁"]
+    Gate --> Persist["JSON/Markdown + 最近 20 次历史"]
+    Persist --> SSE["result / done"]
+```
+
 ## 分流规则
 
 - 命中路线、步行、导览、游客、参观等关键词，或输入含 `name,lat,lng;...` 点位格式时，进入 `guide_agent`。
@@ -96,6 +118,7 @@ flowchart TD
 - 本地使用 `InMemorySaver`；服务重启后待审批线程失效并要求重新运行。
 - 会话消息使用本地 JSONL 持久化，服务重启后可继续同一上下文；`MEMORY.md` 提供人工维护的长期运营约束。
 - LLM 消息通过 SSE `delta` 事件流式返回，质量门禁和审批边界不因此绕过。
+- 每个新维护任务必须先调用 `timecampus_rag_search`，RAG 回答末尾必须列出工具结果中的原始 `timecampus://` URI。
 
 ## 游客导引智能体
 
@@ -117,7 +140,7 @@ flowchart TD
 ```powershell
 uv run pytest
 uv run ruff check .
-uv run timecampus-agent eval run --suite all --mode fixture --report-dir eval-reports --min-pass-rate 0.85 --min-overall 80
+uv run timecampus-agent eval run --suite all --mode fixture --repetitions 2 --report-dir eval-reports --min-pass-rate 0.85 --min-overall 80 --min-consistency 0.80
 uv run timecampus-agent serve
 ```
 

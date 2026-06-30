@@ -1,0 +1,19 @@
+[Unit]
+Description=TimeCampus LangGraph Agent
+After=network-online.target timecampus-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/timecampus-agent/current
+EnvironmentFile=/home/ubuntu/TimeCampus/.env
+ExecStart=/home/ubuntu/timecampus-agent/current/.venv/bin/timecampus-agent serve --host 127.0.0.1 --port 8090
+Restart=always
+RestartSec=5
+SuccessExitStatus=143
+StandardOutput=append:/home/ubuntu/timecampus-agent/shared/agent.log
+StandardError=append:/home/ubuntu/timecampus-agent/shared/agent.log
+
+[Install]
+WantedBy=multi-user.target

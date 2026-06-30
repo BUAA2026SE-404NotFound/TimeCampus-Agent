@@ -15,6 +15,7 @@ class ToolCall(BaseModel):
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     result: dict[str, Any] | None = None
+    status: Literal["requested", "executed", "interrupted", "error"] = "executed"
 
 
 class RetrievedDoc(BaseModel):
@@ -59,6 +60,7 @@ class EvalResult(BaseModel):
     suite: EvalSuite
     target: str
     mode: EvalMode
+    attempt: int = 1
     metrics: dict[str, float]
     overall: float
     passed: bool
@@ -71,8 +73,11 @@ class EvalResult(BaseModel):
 class EvalSummary(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    run_id: str = Field(alias="runId")
     suite: str
     mode: EvalMode
+    repetitions: int
+    case_count: int = Field(alias="caseCount")
     total: int
     passed: int
     failed: int
@@ -80,5 +85,16 @@ class EvalSummary(BaseModel):
     average_overall: float = Field(alias="averageOverall")
     min_pass_rate: float = Field(alias="minPassRate")
     min_overall: float = Field(alias="minOverall")
+    min_consistency: float = Field(alias="minConsistency")
+    consistency_rate: float = Field(alias="consistencyRate")
+    p50_latency_ms: int | None = Field(default=None, alias="p50LatencyMs")
+    p95_latency_ms: int | None = Field(default=None, alias="p95LatencyMs")
+    high_risk_passed: bool = Field(alias="highRiskPassed")
+    gate_passed: bool = Field(alias="gatePassed")
+    agent_version: str = Field(alias="agentVersion")
+    git_commit: str = Field(alias="gitCommit")
+    model: str
+    prompt_version: str = Field(alias="promptVersion")
+    dataset_version: str = Field(alias="datasetVersion")
     generated_at: str = Field(alias="generatedAt")
     results: list[EvalResult]

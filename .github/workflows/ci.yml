@@ -8,6 +8,16 @@ on:
       - "feature/**"
       - "codex/**"
   pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy the tested wheel to the production host"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -36,4 +46,57 @@ jobs:
         run: uv run pytest
 
       - name: Fixture eval gate
-        run: uv run timecampus-agent eval run --suite all --mode fixture --report-dir eval-reports --min-pass-rate 0.85 --min-overall 80
+        run: uv run timecampus-agent eval run --suite all --mode fixture --repetitions 2 --report-dir eval-reports --min-pass-rate 0.85 --min-overall 80 --min-consistency 0.80
+
+      - name: Build wheel
+        run: uv build
+
+      - name: Prepare release artifact
+        run: |
+          mkdir release
+          cp dist/*.whl deploy/deploy-agent-artifact.sh deploy/timecampus-agent.service release/
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: timecampus-agent-${{ github.sha }}
+          path: release/
+          if-no-files-found: error
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy }}
+    env:
+      SERVER_HOST: ${{ secrets.DEPLOY_HOST }}
+      SERVER_USERNAME: ${{ secrets.DEPLOY_USERNAME || secrets.DEPLOY_USER }}
+      SERVER_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
+
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: timecampus-agent-${{ github.sha }}
+          path: release
+
+      - name: Upload release
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ env.SERVER_HOST }}
+          username: ${{ env.SERVER_USERNAME }}
+          password: ${{ env.SERVER_PASSWORD }}
+          source: "release/*"
+          target: "/home/${{ env.SERVER_USERNAME }}/timecampus-agent/incoming/${{ github.sha }}"
+          strip_components: 1
+
+      - name: Activate release
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.SERVER_HOST }}
+          username: ${{ env.SERVER_USERNAME }}
+          password: ${{ env.SERVER_PASSWORD }}
+          script: |
+            set -euo pipefail
+            INCOMING="$HOME/timecampus-agent/incoming/${{ github.sha }}"
+            chmod +x "$INCOMING/deploy-agent-artifact.sh"
+            "$INCOMING/deploy-agent-artifact.sh" "$INCOMING/"*.whl "${{ github.sha }}"

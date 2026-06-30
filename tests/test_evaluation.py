@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -11,6 +12,7 @@ from timecampus_agent.evaluation.models import AgentTrace, ToolCall
 from timecampus_agent.evaluation.reports import write_eval_report
 from timecampus_agent.evaluation.runner import EvalRunner
 from timecampus_agent.evaluation.scorers import score_case
+from timecampus_agent.evaluation.store import EvalStore
 
 
 def settings() -> Settings:
@@ -34,9 +36,9 @@ def test_load_eval_cases_filters_by_suite() -> None:
     maintenance_cases = load_eval_cases("maintenance")
     guide_cases = load_eval_cases("guide")
 
-    assert len(all_cases) == 9
-    assert len(maintenance_cases) == 4
-    assert len(guide_cases) == 5
+    assert len(all_cases) == 15
+    assert len(maintenance_cases) == 7
+    assert len(guide_cases) == 8
     assert {case.suite for case in all_cases} == {"maintenance", "guide"}
 
 
@@ -50,7 +52,7 @@ def test_fixture_runner_produces_passing_summary(monkeypatch) -> None:
         raise AssertionError("fixture mode must not access network")
 
     monkeypatch.setattr(
-        "timecampus_agent.evaluation.runner.call_timecampus_mcp_tool",
+        "timecampus_agent.evaluation.runner.build_operations_mcp_agent",
         fail_network,
     )
 
@@ -61,7 +63,7 @@ def test_fixture_runner_produces_passing_summary(monkeypatch) -> None:
         min_overall=80,
     )
 
-    assert summary.total == 9
+    assert summary.total == 15
     assert summary.failed == 0
     assert summary.pass_rate == 1
     assert summary.average_overall >= 90
@@ -84,6 +86,43 @@ def test_action_safety_flags_destructive_tool() -> None:
     assert "low-actionSafety" in result.bad_case_tags
 
 
+def test_retrieval_metrics_support_environment_stable_document_types() -> None:
+    case = next(
+        item for item in load_eval_cases("maintenance")
+        if item.id == "maintenance-rag-main-building-photos"
+    )
+    trace = load_fixture_trace(case.id)
+
+    result = score_case(case, trace, "fixture")
+
+    assert result.metrics["retrievalRecall"] == 100
+    assert result.metrics["mrr"] == 100
+
+
+def test_bad_case_creation_is_deduplicated_under_concurrency(tmp_path) -> None:
+    store = EvalStore(tmp_path)
+    summary = EvalRunner(settings()).run(
+        suite="maintenance",
+        mode="fixture",
+        case_ids=["maintenance-prompt-injection-delete"],
+    )
+    store.save(summary)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        items = list(
+            executor.map(
+                lambda _: store.add_bad_case(
+                    summary.run_id,
+                    "maintenance-prompt-injection-delete",
+                ),
+                range(4),
+            )
+        )
+
+    assert len({item["id"] for item in items}) == 1
+    assert len(store.list_bad_cases()) == 1
+
+
 def test_report_writes_json_and_markdown(tmp_path) -> None:
     summary = EvalRunner(settings()).run(suite="guide", mode="fixture")
 
@@ -92,7 +131,7 @@ def test_report_writes_json_and_markdown(tmp_path) -> None:
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     markdown = markdown_path.read_text(encoding="utf-8")
     assert payload["suite"] == "guide"
-    assert payload["total"] == 5
+    assert payload["total"] == 8
     assert "# TimeCampus Agent Eval Report" in markdown
     assert "guide-route-two-points" in markdown
 
@@ -137,3 +176,46 @@ def test_fixture_trace_contains_expected_alias_fields() -> None:
     assert "toolCalls" in payload
     assert "routePlan" in payload
     assert "latencyMs" in payload
+
+
+def test_repeated_fixture_run_reports_consistency_and_gate() -> None:
+    summary = EvalRunner(settings()).run(
+        suite="all",
+        mode="fixture",
+        repetitions=3,
+    )
+
+    assert summary.total == 45
+    assert summary.consistency_rate == 1
+    assert summary.high_risk_passed is True
+    assert summary.gate_passed is True
+
+
+def test_eval_store_keeps_latest_runs_and_bad_case_lifecycle(tmp_path) -> None:
+    store = EvalStore(tmp_path, max_runs=2)
+    summaries = [
+        EvalRunner(settings()).run(
+            suite="guide",
+            mode="fixture",
+            case_ids=["guide-route-two-points"],
+        )
+        for _ in range(3)
+    ]
+    for summary in summaries:
+        store.save(summary)
+
+    assert len(store.list_runs()) == 2
+    bad_case = store.add_bad_case(
+        summaries[-1].run_id,
+        "guide-route-two-points",
+        "人工复核",
+    )
+    duplicate = store.add_bad_case(
+        summaries[-1].run_id,
+        "guide-route-two-points",
+    )
+    assert duplicate["id"] == bad_case["id"]
+    resolved = store.update_bad_case(bad_case["id"], "resolved", "已补回归测试")
+    assert resolved["status"] == "resolved"
+    assert store.list_bad_cases("open") == []
+    assert store.list_bad_cases("resolved")[0]["resolution"] == "已补回归测试"

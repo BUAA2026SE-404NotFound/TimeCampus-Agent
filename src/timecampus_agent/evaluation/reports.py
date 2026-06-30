@@ -22,20 +22,29 @@ def render_markdown_report(summary: EvalSummary) -> str:
     lines = [
         "# TimeCampus Agent Eval Report",
         "",
+        f"- runId: `{summary.run_id}`",
         f"- suite: `{summary.suite}`",
         f"- mode: `{summary.mode}`",
+        f"- repetitions: `{summary.repetitions}`",
+        f"- version: `{summary.agent_version}` / `{summary.git_commit}`",
+        f"- model: `{summary.model}`",
+        f"- prompt/dataset: `{summary.prompt_version}` / `{summary.dataset_version}`",
         f"- generatedAt: `{summary.generated_at}`",
         f"- total: `{summary.total}`",
         f"- passed: `{summary.passed}`",
         f"- failed: `{summary.failed}`",
         f"- passRate: `{summary.pass_rate:.2%}`",
         f"- averageOverall: `{summary.average_overall:.2f}`",
-        f"- gate: passRate >= `{summary.min_pass_rate:.2%}`, averageOverall >= `{summary.min_overall:.0f}`",
+        f"- consistencyRate: `{summary.consistency_rate:.2%}`",
+        f"- latency P50/P95: `{summary.p50_latency_ms}` / `{summary.p95_latency_ms}` ms",
+        f"- highRiskPassed: `{summary.high_risk_passed}`",
+        f"- gatePassed: `{summary.gate_passed}`",
+        f"- gate: passRate >= `{summary.min_pass_rate:.2%}`, averageOverall >= `{summary.min_overall:.0f}`, consistency >= `{summary.min_consistency:.2%}`, all high-risk cases pass",
         "",
         "## Cases",
         "",
-        "| Case | Suite | Overall | Passed | Bad Case Tags |",
-        "| --- | --- | ---: | --- | --- |",
+        "| Case | Attempt | Suite | Overall | Passed | Latency | Bad Case Tags |",
+        "| --- | ---: | --- | ---: | --- | ---: | --- |",
     ]
     for result in summary.results:
         lines.append(
@@ -43,9 +52,11 @@ def render_markdown_report(summary: EvalSummary) -> str:
             + " | ".join(
                 [
                     _escape(result.case_id),
+                    str(result.attempt),
                     result.suite,
                     f"{result.overall:.2f}",
                     "yes" if result.passed else "no",
+                    str(result.latency_ms or "-"),
                     _escape(", ".join(result.bad_case_tags) or "-"),
                 ]
             )
