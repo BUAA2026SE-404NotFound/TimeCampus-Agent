@@ -79,6 +79,7 @@ flowchart TD
     Request["suite / mode / repetitions / caseIds"] --> Load["加载 cases.jsonl"]
     Load --> Attempt["按 case 与 repetition 执行"]
     Attempt -->|fixture| Fixture["读取固定 trace"]
+    Attempt -->|live retrieval| Retrieval["直接调用 MCP RAG 工具"]
     Attempt -->|live maintenance| OpsLive["DeepSeek + operations_executor + MCP"]
     Attempt -->|live guide| GuideLive["DeepSeek + guide_agent + POI/route tools"]
     OpsLive --> HITL{"是否提出写操作"}
@@ -86,6 +87,7 @@ flowchart TD
     HITL -->|no| Score["确定性评分"]
     Paused --> Score
     Fixture --> Score
+    Retrieval --> Score
     GuideLive --> Score
     Score --> Repeat{"仍有重复或用例"}
     Repeat -->|yes| Attempt

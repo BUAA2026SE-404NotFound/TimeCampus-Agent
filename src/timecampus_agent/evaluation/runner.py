@@ -32,7 +32,7 @@ from timecampus_agent.evaluation.models import (
     RetrievedDoc,
     ToolCall,
 )
-from timecampus_agent.evaluation.scorers import score_case
+from timecampus_agent.evaluation.scorers import finalize_result, score_case
 from timecampus_agent.operations_runtime import build_operations_mcp_agent
 from timecampus_agent.tools import build_guide_tools
 
@@ -99,8 +99,20 @@ class EvalRunner:
         if not self.settings.chat_api_key:
             raise RuntimeError("TIMECAMPUS_CHAT_API_KEY is required for live eval.")
         operations_agent = None
+        retrieval_tool = None
         if any(case.suite == "maintenance" for case in cases):
-            operations_agent, _client = await build_operations_mcp_agent(self.settings)
+            operations_agent, client = await build_operations_mcp_agent(self.settings)
+            if any(case.target == "retrieval" for case in cases):
+                retrieval_tool = next(
+                    (
+                        tool
+                        for tool in await client.get_tools()
+                        if tool.name == "timecampus_rag_search"
+                    ),
+                    None,
+                )
+                if retrieval_tool is None:
+                    raise RuntimeError("Backend MCP did not expose timecampus_rag_search.")
         guide_agent = None
         if any(case.suite == "guide" for case in cases):
             model = ChatDeepSeek(
@@ -124,7 +136,12 @@ class EvalRunner:
         total = len(cases) * repetitions
         for case in cases:
             for attempt in range(1, repetitions + 1):
-                trace = await self._run_live_case(case, operations_agent, guide_agent)
+                trace = await self._run_live_case(
+                    case,
+                    operations_agent,
+                    guide_agent,
+                    retrieval_tool,
+                )
                 result = self._score(case, trace, "live", attempt)
                 results.append(result)
                 if progress:
@@ -136,10 +153,13 @@ class EvalRunner:
         case: EvalCase,
         operations_agent: Any,
         guide_agent: Any,
+        retrieval_tool: Any,
     ) -> AgentTrace:
         boundary = _boundary_trace(case)
         if boundary:
             return boundary
+        if case.target == "retrieval":
+            return await _run_retrieval_case(case, retrieval_tool)
         agent = operations_agent if case.suite == "maintenance" else guide_agent
         started = time.perf_counter()
         messages: list[BaseMessage] = []
@@ -174,9 +194,19 @@ class EvalRunner:
     ) -> EvalResult:
         result = score_case(case, trace, mode)
         result.attempt = attempt
-        llm_metrics = score_with_llm_judge(self.settings, case, trace)
-        if llm_metrics:
+        if mode == "live" and case.expected.get("llmJudge"):
+            llm_metrics = score_with_llm_judge(self.settings, case, trace)
             result.metrics.update(llm_metrics)
+            missing = {
+                "llmAnswerCorrectness",
+                "llmFaithfulness",
+            } - result.metrics.keys()
+            failures = (
+                [f"llmJudge missing metrics: {', '.join(sorted(missing))}"]
+                if missing
+                else []
+            )
+            finalize_result(case, result, failures)
         return result
 
 
@@ -287,7 +317,7 @@ def _docs_from_payload(payload: dict[str, Any]) -> list[RetrievedDoc]:
     value = _unwrap_payload(payload)
     hits = value.get("hits", []) if isinstance(value, dict) else []
     docs = []
-    for hit in hits if isinstance(hits, list) else []:
+    for rank, hit in enumerate(hits if isinstance(hits, list) else [], start=1):
         document = hit.get("document", {}) if isinstance(hit, dict) else {}
         if not isinstance(document, dict):
             continue
@@ -298,6 +328,9 @@ def _docs_from_payload(payload: dict[str, Any]) -> list[RetrievedDoc]:
                 title=str(document.get("title", "")),
                 uri=str(document.get("uri", "")),
                 text=str(document.get("text", "")),
+                rank=rank,
+                score=float(hit["score"]) if isinstance(hit.get("score"), int | float) else None,
+                reason=str(hit.get("reason", "")) or None,
                 metadata=document.get("metadata", {})
                 if isinstance(document.get("metadata"), dict)
                 else {},
@@ -373,6 +406,7 @@ def _summary(
         failed=total - passed,
         passRate=pass_rate,
         averageOverall=average,
+        metricAverages=_metric_averages(results),
         minPassRate=min_pass_rate,
         minOverall=min_overall,
         minConsistency=min_consistency,
@@ -404,6 +438,17 @@ def _consistency(results: list[EvalResult]) -> float:
     return round(stable / max(1, len(grouped)), 4)
 
 
+def _metric_averages(results: list[EvalResult]) -> dict[str, float]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for result in results:
+        for name, score in result.metrics.items():
+            grouped[name].append(score)
+    return {
+        name: round(sum(scores) / len(scores), 2)
+        for name, scores in sorted(grouped.items())
+    }
+
+
 def _percentile(values: list[int], percentile: float) -> int | None:
     if not values:
         return None
@@ -427,3 +472,43 @@ def _content_text(content: Any) -> str:
 
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+async def _run_retrieval_case(case: EvalCase, tool: Any) -> AgentTrace:
+    started = time.perf_counter()
+    arguments = {
+        key: value
+        for key, value in case.input.items()
+        if key in {"query", "limit", "types", "poiId", "includePending"}
+    }
+    try:
+        raw_result = await tool.ainvoke(arguments)
+        content = raw_result.content if isinstance(raw_result, BaseMessage) else raw_result
+        payload = content if isinstance(content, dict) else _json_object(_content_text(content))
+        docs = _docs_from_payload(payload)
+        return AgentTrace(
+            output=f"Retrieved {len(docs)} grounded documents.",
+            toolCalls=[
+                ToolCall(
+                    name="timecampus_rag_search",
+                    arguments=arguments,
+                    result=payload,
+                    status="executed",
+                )
+            ],
+            retrievedDocs=docs,
+            latencyMs=_elapsed_ms(started),
+        )
+    except Exception as exception:
+        return AgentTrace(
+            output="RAG retrieval failed.",
+            toolCalls=[
+                ToolCall(
+                    name="timecampus_rag_search",
+                    arguments=arguments,
+                    status="error",
+                )
+            ],
+            latencyMs=_elapsed_ms(started),
+            error=str(exception),
+        )

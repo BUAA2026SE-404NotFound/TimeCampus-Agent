@@ -26,6 +26,9 @@ class RetrievedDoc(BaseModel):
     title: str
     uri: str
     text: str = ""
+    rank: int | None = None
+    score: float | None = None
+    reason: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -83,6 +86,7 @@ class EvalSummary(BaseModel):
     failed: int
     pass_rate: float = Field(alias="passRate")
     average_overall: float = Field(alias="averageOverall")
+    metric_averages: dict[str, float] = Field(alias="metricAverages")
     min_pass_rate: float = Field(alias="minPassRate")
     min_overall: float = Field(alias="minOverall")
     min_consistency: float = Field(alias="minConsistency")

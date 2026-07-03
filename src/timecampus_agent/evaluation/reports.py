@@ -35,6 +35,7 @@ def render_markdown_report(summary: EvalSummary) -> str:
         f"- failed: `{summary.failed}`",
         f"- passRate: `{summary.pass_rate:.2%}`",
         f"- averageOverall: `{summary.average_overall:.2f}`",
+        f"- metricAverages: `{json.dumps(summary.metric_averages, ensure_ascii=False)}`",
         f"- consistencyRate: `{summary.consistency_rate:.2%}`",
         f"- latency P50/P95: `{summary.p50_latency_ms}` / `{summary.p95_latency_ms}` ms",
         f"- highRiskPassed: `{summary.high_risk_passed}`",

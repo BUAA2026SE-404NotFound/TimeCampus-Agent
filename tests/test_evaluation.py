@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 
@@ -10,7 +11,7 @@ from timecampus_agent.config import Settings
 from timecampus_agent.evaluation.cases import load_eval_cases, load_fixture_trace
 from timecampus_agent.evaluation.models import AgentTrace, ToolCall
 from timecampus_agent.evaluation.reports import write_eval_report
-from timecampus_agent.evaluation.runner import EvalRunner
+from timecampus_agent.evaluation.runner import EvalRunner, _run_retrieval_case
 from timecampus_agent.evaluation.scorers import score_case
 from timecampus_agent.evaluation.store import EvalStore
 
@@ -36,8 +37,8 @@ def test_load_eval_cases_filters_by_suite() -> None:
     maintenance_cases = load_eval_cases("maintenance")
     guide_cases = load_eval_cases("guide")
 
-    assert len(all_cases) == 15
-    assert len(maintenance_cases) == 7
+    assert len(all_cases) == 31
+    assert len(maintenance_cases) == 23
     assert len(guide_cases) == 8
     assert {case.suite for case in all_cases} == {"maintenance", "guide"}
 
@@ -63,7 +64,7 @@ def test_fixture_runner_produces_passing_summary(monkeypatch) -> None:
         min_overall=80,
     )
 
-    assert summary.total == 15
+    assert summary.total == 31
     assert summary.failed == 0
     assert summary.pass_rate == 1
     assert summary.average_overall >= 90
@@ -185,10 +186,88 @@ def test_repeated_fixture_run_reports_consistency_and_gate() -> None:
         repetitions=3,
     )
 
-    assert summary.total == 45
+    assert summary.total == 93
     assert summary.consistency_rate == 1
     assert summary.high_risk_passed is True
     assert summary.gate_passed is True
+
+
+def test_rag_benchmark_reports_uri_metrics_and_averages() -> None:
+    summary = EvalRunner(settings()).run(
+        suite="maintenance",
+        mode="fixture",
+        case_ids=["rag-poi-main-building-exact"],
+    )
+
+    result = summary.results[0]
+    assert result.metrics["retrievalRecall"] == 100
+    assert result.metrics["mrr"] == 100
+    assert result.metrics["retrievalHitAt1"] == 100
+    assert result.metrics["sourceDiversity"] == 100
+    assert summary.metric_averages["retrievalRecall"] == 100
+
+
+def test_rag_benchmark_detects_wrong_first_result() -> None:
+    case = next(
+        item for item in load_eval_cases("maintenance")
+        if item.id == "rag-poi-main-building-exact"
+    )
+    trace = AgentTrace(
+        output="Retrieved 2 grounded documents.",
+        retrievedDocs=[
+            {
+                "id": "poi:9002",
+                "type": "poi",
+                "title": "新主楼",
+                "uri": "timecampus://poi/9002",
+            },
+            {
+                "id": "poi:9001",
+                "type": "poi",
+                "title": "北航主楼",
+                "uri": "timecampus://poi/9001",
+            },
+        ],
+    )
+
+    result = score_case(case, trace, "fixture")
+
+    assert result.metrics["retrievalRecall"] == 100
+    assert result.metrics["mrr"] == 50
+    assert result.metrics["retrievalHitAt1"] == 0
+    assert result.passed is False
+
+
+def test_live_retrieval_target_parses_mcp_hits() -> None:
+    class Tool:
+        async def ainvoke(self, arguments):
+            return {
+                "hits": [
+                    {
+                        "score": 0.9,
+                        "reason": "qdrant rank 1",
+                        "document": {
+                            "id": "poi:9001",
+                            "type": "poi",
+                            "title": "北航主楼",
+                            "uri": "timecampus://poi/9001",
+                            "text": "校园地标",
+                        },
+                    }
+                ]
+            }
+
+    case = next(
+        item for item in load_eval_cases("maintenance")
+        if item.id == "rag-poi-main-building-exact"
+    )
+
+    trace = asyncio.run(_run_retrieval_case(case, Tool()))
+
+    assert trace.error is None
+    assert trace.tool_calls[0].name == "timecampus_rag_search"
+    assert trace.retrieved_docs[0].rank == 1
+    assert trace.retrieved_docs[0].score == 0.9
 
 
 def test_eval_store_keeps_latest_runs_and_bad_case_lifecycle(tmp_path) -> None:

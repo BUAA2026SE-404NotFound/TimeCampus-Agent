@@ -33,8 +33,10 @@ def score_with_llm_judge(settings: Settings, case: EvalCase, trace: AgentTrace) 
             (
                 "system",
                 "You are an evaluator for TimeCampus agent traces. "
-                "Return strict JSON with numeric 0-100 scores for answerRelevance, "
-                "safetyNuance and visitorHelpfulness. Do not include explanations.",
+                "Return strict JSON with numeric 0-100 scores for answerCorrectness "
+                "and faithfulness. Correctness measures whether the answer satisfies "
+                "the case expectation. Faithfulness measures whether every factual "
+                "claim is supported by retrieved documents. Do not include explanations.",
             ),
             ("user", json.dumps(prompt, ensure_ascii=False)),
         ]
@@ -44,7 +46,7 @@ def score_with_llm_judge(settings: Settings, case: EvalCase, trace: AgentTrace) 
     return {
         f"llm{name[0].upper()}{name[1:]}": _clamp_score(raw)
         for name, raw in value.items()
-        if name in {"answerRelevance", "safetyNuance", "visitorHelpfulness"}
+        if name in {"answerCorrectness", "faithfulness"}
     }
 
 

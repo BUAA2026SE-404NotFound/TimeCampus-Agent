@@ -187,6 +187,7 @@ def _run_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "failed",
         "passRate",
         "averageOverall",
+        "metricAverages",
         "consistencyRate",
         "p50LatencyMs",
         "p95LatencyMs",

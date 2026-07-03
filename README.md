@@ -81,7 +81,7 @@ uv run timecampus-agent route "主楼,39.981,116.34;图书馆,39.982,116.341"
 核心对象：
 
 - `EvalCase`：评测用例，包含 suite、target、input、expected、checks、tags 和 riskLevel。
-- `AgentTrace`：运行轨迹，包含 output、toolCalls、retrievedDocs、routePlan、latencyMs 和 error。
+- `AgentTrace`：运行轨迹，包含 output、toolCalls、带排名/分数的 retrievedDocs、routePlan、latencyMs 和 error。
 - `EvalResult`：评分结果，包含 metrics、overall、passed、failureReasons 和 badCaseTags。
 
 评测用例来自版本化 `evaluation/cases.jsonl`。默认 fixture 模式不访问网络，适合 CI：
@@ -98,6 +98,11 @@ uv run timecampus-agent eval run --suite maintenance --mode live --repetitions 3
 uv run timecampus-agent eval run --suite guide --mode live --repetitions 3
 ```
 
+标记为 `rag-benchmark`、`target=retrieval` 的 16 条用例会直接调用 MCP
+`timecampus_rag_search`，用 Recall@K、MRR、Hit@1 和 source diversity
+隔离评估检索器；开放式 RAG 回答再由明确标记的 LLM Judge 评估
+answer correctness 与 faithfulness。
+
 报告输出：
 
 - `eval-reports/eval-report.json`：CI 和机器解析。
@@ -112,7 +117,8 @@ TIMECAMPUS_EVAL_LLM_ENABLED=true
 TIMECAMPUS_CHAT_API_KEY=<key>
 ```
 
-LLM-as-judge 只增强开放式指标，不作为默认 CI 阻断项。
+LLM-as-judge 不在 Fixture/CI 中运行；对显式标记的 Live 用例，其分数会重新计算
+overall 并参与质量门禁，缺失或解析失败会记录为失败。
 
 ## 架构
 

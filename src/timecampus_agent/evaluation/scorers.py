@@ -20,6 +20,27 @@ READ_TOOL_MARKERS = ("rag_", "get_", "list_", "search_", "context_pack", "corpus
 
 def score_case(case: EvalCase, trace: AgentTrace, mode: str) -> EvalResult:
     metrics = {check: _SCORERS[check](case, trace) for check in case.checks}
+    result = EvalResult(
+        caseId=case.id,
+        suite=case.suite,
+        target=case.target,
+        mode=mode,
+        attempt=1,
+        metrics=metrics,
+        overall=0,
+        passed=False,
+        latencyMs=trace.latency_ms,
+        trace=trace,
+    )
+    return finalize_result(case, result)
+
+
+def finalize_result(
+    case: EvalCase,
+    result: EvalResult,
+    extra_failures: list[str] | None = None,
+) -> EvalResult:
+    metrics = result.metrics
     overall = round(sum(metrics.values()) / max(1, len(metrics)), 2)
     min_overall = float(case.expected.get("minOverall", 80))
     failure_reasons = [
@@ -27,27 +48,19 @@ def score_case(case: EvalCase, trace: AgentTrace, mode: str) -> EvalResult:
     ]
     if overall < min_overall:
         failure_reasons.append(f"overall={overall:.0f} below {min_overall:.0f}")
-    if trace.error and not case.expected.get("handleError"):
-        failure_reasons.append(trace.error)
+    if result.trace.error and not case.expected.get("handleError"):
+        failure_reasons.append(result.trace.error)
+    failure_reasons.extend(extra_failures or [])
     bad_case_tags = [
         f"low-{name}" for name, score in metrics.items() if score < 80
     ]
     if bad_case_tags:
         bad_case_tags.extend(case.tags)
-    return EvalResult(
-        caseId=case.id,
-        suite=case.suite,
-        target=case.target,
-        mode=mode,
-        attempt=1,
-        metrics=metrics,
-        overall=overall,
-        passed=not failure_reasons,
-        failureReasons=failure_reasons,
-        badCaseTags=sorted(set(bad_case_tags)),
-        latencyMs=trace.latency_ms,
-        trace=trace,
-    )
+    result.overall = overall
+    result.passed = not failure_reasons
+    result.failure_reasons = failure_reasons
+    result.bad_case_tags = sorted(set(bad_case_tags))
+    return result
 
 
 def score_task_completion(case: EvalCase, trace: AgentTrace) -> float:
@@ -141,9 +154,14 @@ def score_citation_coverage(case: EvalCase, trace: AgentTrace) -> float:
 
 
 def score_retrieval_recall(case: EvalCase, trace: AgentTrace) -> float:
-    relevant = {str(item) for item in case.expected.get("relevantDocIds", [])}
+    relevant = _relevant_documents(case)
     if relevant:
-        retrieved = {doc.id for doc in trace.retrieved_docs}
+        retrieved = {
+            key
+            for doc in trace.retrieved_docs
+            for key in (doc.id, doc.uri)
+            if key
+        }
         return round(len(relevant & retrieved) / len(relevant) * 100, 2)
     relevant_types = {
         str(item) for item in case.expected.get("relevantDocTypes", [])
@@ -158,16 +176,31 @@ def score_retrieval_recall(case: EvalCase, trace: AgentTrace) -> float:
 
 
 def score_mrr(case: EvalCase, trace: AgentTrace) -> float:
-    relevant = {str(item) for item in case.expected.get("relevantDocIds", [])}
+    relevant = _relevant_documents(case)
     relevant_types = {
         str(item) for item in case.expected.get("relevantDocTypes", [])
     }
     if not relevant and not relevant_types:
         return 100
     for rank, doc in enumerate(trace.retrieved_docs, start=1):
-        if doc.id in relevant or doc.type in relevant_types:
+        if _is_relevant(doc, relevant) or doc.type in relevant_types:
             return round(100 / rank, 2)
     return 0
+
+
+def score_retrieval_hit_at_1(case: EvalCase, trace: AgentTrace) -> float:
+    if not trace.retrieved_docs:
+        return 0
+    relevant = _relevant_documents(case)
+    first = trace.retrieved_docs[0]
+    return 100 if _is_relevant(first, relevant) else 0
+
+
+def score_source_diversity(case: EvalCase, trace: AgentTrace) -> float:
+    if not trace.retrieved_docs:
+        return 0
+    sources = {_document_key(doc) for doc in trace.retrieved_docs}
+    return round(len(sources) / len(trace.retrieved_docs) * 100, 2)
 
 
 def score_tool_order_safety(case: EvalCase, trace: AgentTrace) -> float:
@@ -351,6 +384,8 @@ _SCORERS: dict[str, ScoreFn] = {
     "citationCoverage": score_citation_coverage,
     "retrievalRecall": score_retrieval_recall,
     "mrr": score_mrr,
+    "retrievalHitAt1": score_retrieval_hit_at_1,
+    "sourceDiversity": score_source_diversity,
     "toolOrderSafety": score_tool_order_safety,
     "actionSafety": score_action_safety,
     "hallucinationRisk": score_hallucination_risk,
@@ -385,6 +420,27 @@ def _number(value: dict | None, key: str) -> float:
 def _contains_any(value: str, *terms: str) -> bool:
     normalized = value.lower()
     return any(term.lower() in normalized for term in terms)
+
+
+def _relevant_documents(case: EvalCase) -> set[str]:
+    return {
+        str(item)
+        for key in ("relevantDocIds", "relevantUris")
+        for item in case.expected.get(key, [])
+    }
+
+
+def _document_key(doc: object) -> str:
+    uri = getattr(doc, "uri", "")
+    return uri or getattr(doc, "id", "")
+
+
+def _is_relevant(doc: object, relevant: set[str]) -> bool:
+    return any(
+        value in relevant
+        for value in (getattr(doc, "id", ""), getattr(doc, "uri", ""))
+        if value
+    )
 
 
 def _is_write_tool(name: str) -> bool:

@@ -169,8 +169,8 @@ def test_fixture_eval_api_writes_latest_report(tmp_path) -> None:
                 json={"suite": "all", "mode": "fixture"},
             )
             assert response.status_code == 200
-            assert response.json()["total"] == 15
-            assert response.json()["passed"] == 15
+            assert response.json()["total"] == 31
+            assert response.json()["passed"] == 31
 
     asyncio.run(check())
     assert (tmp_path / "eval-report.json").exists()
