@@ -147,9 +147,12 @@ jobs:
               sleep 1
             done
 
-            set -a
-            . "$ENV_FILE"
-            set +a
+            TIMECAMPUS_AGENT_API_TOKEN="$(
+              sed -n 's/^TIMECAMPUS_AGENT_API_TOKEN=//p' "$ENV_FILE" |
+                tail -n 1 |
+                tr -d '\r'
+            )"
+            test -n "$TIMECAMPUS_AGENT_API_TOKEN"
             PYTHON="$HOME/timecampus-agent/current/.venv/bin/python"
             REPORT_DIR="$HOME/timecampus-agent/shared/eval-reports"
 
