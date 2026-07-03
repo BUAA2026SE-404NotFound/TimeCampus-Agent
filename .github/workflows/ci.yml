@@ -201,6 +201,16 @@ jobs:
                 "p50LatencyMs": result["p50LatencyMs"],
                 "p95LatencyMs": result["p95LatencyMs"],
                 "gatePassed": result["gatePassed"],
+                "failures": [{
+                    "caseId": item["caseId"],
+                    "attempt": item["attempt"],
+                    "metrics": item["metrics"],
+                    "reasons": item["failureReasons"],
+                    "topUris": [
+                        doc["uri"]
+                        for doc in item["trace"].get("retrievedDocs", [])[:3]
+                    ],
+                } for item in result["results"] if not item["passed"]],
             }, ensure_ascii=False))
             PY
             }
