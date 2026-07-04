@@ -35,3 +35,16 @@ def test_session_store_rejects_invalid_session_path(tmp_path) -> None:
         assert "Invalid session id" in str(exception)
     else:
         raise AssertionError("invalid session id should be rejected")
+
+
+def test_session_store_does_not_list_empty_sessions(tmp_path) -> None:
+    store = SessionStore(tmp_path)
+    session = store.create()
+
+    assert store.list() == []
+
+    store.append(session["id"], "user", "检索主楼资料")
+    assert store.list() == []
+
+    store.append(session["id"], "assistant", "已完成主楼资料检索")
+    assert [item["id"] for item in store.list()] == [session["id"]]

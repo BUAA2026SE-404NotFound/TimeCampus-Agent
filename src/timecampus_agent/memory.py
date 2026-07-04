@@ -44,7 +44,9 @@ class SessionStore:
         with self._lock:
             for path in self.sessions_dir.glob("*.jsonl"):
                 session = self._read_path(path)
-                if session:
+                if session and any(
+                    message["role"] == "assistant" for message in session["messages"]
+                ):
                     sessions.append(self._summary(session))
         return sorted(sessions, key=lambda item: item["updatedAt"], reverse=True)
 
