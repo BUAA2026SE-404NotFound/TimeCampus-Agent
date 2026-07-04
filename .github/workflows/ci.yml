@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: "Deploy the tested wheel to the production host"
+        description: "Build and deploy the tested commit on the production host"
         required: false
         default: false
         type: boolean
@@ -56,18 +56,6 @@ jobs:
       - name: Build wheel
         run: uv build
 
-      - name: Prepare release artifact
-        run: |
-          mkdir release
-          cp dist/*.whl deploy/deploy-agent-artifact.sh deploy/timecampus-agent.service release/
-
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: timecampus-agent-${{ github.sha }}
-          path: release/
-          if-no-files-found: error
-
   deploy:
     needs: test
     runs-on: ubuntu-latest
@@ -78,33 +66,30 @@ jobs:
       SERVER_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
 
     steps:
-      - name: Download release artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: timecampus-agent-${{ github.sha }}
-          path: release
-
-      - name: Upload release
-        uses: appleboy/scp-action@v1
-        with:
-          host: ${{ env.SERVER_HOST }}
-          username: ${{ env.SERVER_USERNAME }}
-          password: ${{ env.SERVER_PASSWORD }}
-          source: "release/*"
-          target: "/home/${{ env.SERVER_USERNAME }}/timecampus-agent/incoming/${{ github.sha }}"
-          strip_components: 1
-
-      - name: Activate release
+      - name: Pull, build and activate release
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ env.SERVER_HOST }}
           username: ${{ env.SERVER_USERNAME }}
           password: ${{ env.SERVER_PASSWORD }}
+          command_timeout: 10m
           script: |
             set -euo pipefail
-            INCOMING="$HOME/timecampus-agent/incoming/${{ github.sha }}"
-            chmod +x "$INCOMING/deploy-agent-artifact.sh"
-            "$INCOMING/deploy-agent-artifact.sh" "$INCOMING/"*.whl "${{ github.sha }}"
+            REPO="$HOME/TimeCampus-Agent"
+            URL="https://github.com/${{ github.repository }}.git"
+            BUILD_DIR="$HOME/timecampus-agent/build/${{ github.sha }}"
+            if [ ! -d "$REPO/.git" ]; then
+              git clone "$URL" "$REPO"
+            fi
+            test -z "$(git -C "$REPO" status --porcelain --untracked-files=no)"
+            git -C "$REPO" fetch "$URL" "${{ github.sha }}"
+            git -C "$REPO" checkout --detach "${{ github.sha }}"
+            mkdir -p "$BUILD_DIR"
+            cd "$REPO"
+            uv build --out-dir "$BUILD_DIR"
+            chmod +x deploy/deploy-agent-artifact.sh
+            deploy/deploy-agent-artifact.sh \
+              "$BUILD_DIR/"*.whl "${{ github.sha }}"
 
   live-eval:
     needs:
