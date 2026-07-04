@@ -56,6 +56,7 @@ async def build_operations_mcp_agent(
     settings: Settings,
     *,
     memory_context: str = "",
+    extra_middleware: list[Any] | None = None,
 ) -> tuple[Any, MultiServerMCPClient]:
     if not settings.chat_api_key:
         raise RuntimeError("TIMECAMPUS_CHAT_API_KEY is not configured.")
@@ -96,7 +97,8 @@ async def build_operations_mcp_agent(
             HumanInTheLoopMiddleware(
                 interrupt_on=interrupt_on,
                 description_prefix="TimeCampus write requires administrator approval",
-            )
+            ),
+            *(extra_middleware or []),
         ],
         checkpointer=InMemorySaver(),
         name="operations_executor",

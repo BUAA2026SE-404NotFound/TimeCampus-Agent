@@ -11,7 +11,11 @@ from timecampus_agent.config import Settings
 from timecampus_agent.evaluation.cases import load_eval_cases, load_fixture_trace
 from timecampus_agent.evaluation.models import AgentTrace, ToolCall
 from timecampus_agent.evaluation.reports import write_eval_report
-from timecampus_agent.evaluation.runner import EvalRunner, _run_retrieval_case
+from timecampus_agent.evaluation.runner import (
+    EvalRunner,
+    _inject_live_eval_failures,
+    _run_retrieval_case,
+)
 from timecampus_agent.evaluation.scorers import score_case
 from timecampus_agent.evaluation.store import EvalStore
 
@@ -268,6 +272,26 @@ def test_live_retrieval_target_parses_mcp_hits() -> None:
     assert trace.tool_calls[0].name == "timecampus_rag_search"
     assert trace.retrieved_docs[0].rank == 1
     assert trace.retrieved_docs[0].score == 0.9
+
+
+def test_live_empty_retrieval_fault_is_explicit_and_scoped() -> None:
+    class Request:
+        tool_call = {
+            "id": "call-1",
+            "name": "timecampus_rag_search",
+            "args": {"query": "量子纪念馆 1958"},
+        }
+
+    async def unexpected_handler(request):
+        raise AssertionError("fault-injected call must not reach MCP")
+
+    message = asyncio.run(
+        _inject_live_eval_failures.awrap_tool_call(Request(), unexpected_handler)
+    )
+    payload = json.loads(message.content)
+
+    assert payload["hits"] == []
+    assert payload["usage"] == "fault-injected empty retrieval"
 
 
 def test_eval_store_keeps_latest_runs_and_bad_case_lifecycle(tmp_path) -> None:

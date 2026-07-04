@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 
@@ -38,6 +39,29 @@ from timecampus_agent.tools import build_guide_tools
 
 ProgressCallback = Callable[[int, int, EvalResult], None]
 PROMPT_VERSION = "operations-v2-guide-v2"
+
+
+@wrap_tool_call
+async def _inject_live_eval_failures(request: Any, handler: Any) -> Any:
+    tool_call = request.tool_call
+    arguments = tool_call.get("args", {})
+    if (
+        tool_call.get("name") == "timecampus_rag_search"
+        and "量子纪念馆" in json.dumps(arguments, ensure_ascii=False)
+    ):
+        return ToolMessage(
+            content=json.dumps(
+                {
+                    "query": "量子纪念馆 1958",
+                    "usage": "fault-injected empty retrieval",
+                    "corpusSize": 0,
+                    "hits": [],
+                },
+                ensure_ascii=False,
+            ),
+            tool_call_id=tool_call["id"],
+        )
+    return await handler(request)
 
 
 class EvalRunner:
@@ -101,7 +125,10 @@ class EvalRunner:
         operations_agent = None
         retrieval_tool = None
         if any(case.suite == "maintenance" for case in cases):
-            operations_agent, client = await build_operations_mcp_agent(self.settings)
+            operations_agent, client = await build_operations_mcp_agent(
+                self.settings,
+                extra_middleware=[_inject_live_eval_failures],
+            )
             if any(case.target == "retrieval" for case in cases):
                 retrieval_tool = next(
                     (
