@@ -62,9 +62,15 @@ flowchart TD
     Request --> Gate["Backend RAG 草案与质量门禁"]
     Gate -->|blocked| DraftOnly["仅返回草案与原因"]
     Gate -->|passed| Executor["operations_executor"]
-    Executor --> Read["MCP 读工具"]
+    Executor --> RagCheck{"当前回合已有 RAG 结果"}
+    RagCheck -->|no| Model["DeepSeek 选择工具"]
+    Model -->|未选择 RAG| Retry["强化 RAG 约束并重试一次"]
+    Retry --> Read["MCP timecampus_rag_search"]
+    Model -->|选择 RAG| Read
+    RagCheck -->|yes| ReadMore["其他 MCP 读工具或生成回答"]
     Read --> Executor
-    Executor --> Stream["SSE delta / result"]
+    ReadMore --> Cite["从 ToolMessage 校验/补齐 Sources"]
+    Cite --> Stream["SSE delta / result"]
     Executor -->|proposes write| Interrupt["LangGraph HITL interrupt"]
     Interrupt --> Review["管理员逐项批准或拒绝"]
     Review -->|resume| Executor
