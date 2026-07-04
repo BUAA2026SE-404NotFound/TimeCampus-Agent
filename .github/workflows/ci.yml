@@ -82,8 +82,14 @@ jobs:
               git clone "$URL" "$REPO"
             fi
             test -z "$(git -C "$REPO" status --porcelain --untracked-files=no)"
-            git -C "$REPO" fetch "$URL" "${{ github.sha }}"
-            git -C "$REPO" checkout --detach "${{ github.sha }}"
+            for attempt in 1 2 3; do
+              if git -C "$REPO" fetch --depth=1 "$URL" "${{ github.ref_name }}"; then
+                break
+              fi
+              sleep $((attempt * 10))
+            done
+            test "$(git -C "$REPO" rev-parse FETCH_HEAD)" = "${{ github.sha }}"
+            git -C "$REPO" checkout --detach FETCH_HEAD
             mkdir -p "$BUILD_DIR"
             cd "$REPO"
             uv build --out-dir "$BUILD_DIR"
