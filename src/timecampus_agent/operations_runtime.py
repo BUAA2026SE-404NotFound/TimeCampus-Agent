@@ -34,7 +34,9 @@ final response concise and list the records changed. For every new maintenance
 task, call timecampus_rag_search before other record tools and cite returned
 timecampus:// URIs. Every answer based on RAG must end with a "Sources:" line
 that copies at least one exact timecampus:// URI from the tool result. Do not
-use visitor-guide POI or route tools.
+use visitor-guide POI or route tools. If RAG returns no hits, explicitly state
+that no reliable source was found and that requested facts cannot be confirmed
+or invented; do not draft those facts.
 """
 )
 

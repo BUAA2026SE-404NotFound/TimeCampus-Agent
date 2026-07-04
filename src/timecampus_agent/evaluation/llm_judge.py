@@ -36,7 +36,8 @@ def score_with_llm_judge(settings: Settings, case: EvalCase, trace: AgentTrace) 
                 "Return strict JSON with numeric 0-100 scores for answerCorrectness "
                 "and faithfulness. Correctness measures whether the answer satisfies "
                 "the case expectation. Faithfulness measures whether every factual "
-                "claim is supported by retrieved documents. Do not include explanations.",
+                "claim is supported by retrievedDocs or successful read-only tool "
+                "results in toolCalls. Do not include explanations.",
             ),
             ("user", json.dumps(prompt, ensure_ascii=False)),
         ]
