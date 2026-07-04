@@ -5,7 +5,7 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, wrap_model_call
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.memory import InMemorySaver
@@ -60,12 +60,22 @@ async def enforce_rag_first(request: Any, handler: Any) -> Any:
         for message in current_turn
     )
     if last_user >= 0 and not has_rag_result:
-        request = request.override(
-            tool_choice={
-                "type": "function",
-                "function": {"name": "timecampus_rag_search"},
-            }
+        response = await handler(request)
+        if any(
+            call.get("name") == "timecampus_rag_search"
+            for message in response.result
+            if isinstance(message, AIMessage)
+            for call in message.tool_calls
+        ):
+            return response
+        system_text = request.system_message.text if request.system_message else ""
+        retry_request = request.override(
+            system_message=SystemMessage(
+                content=system_text
+                + "\nYou must call timecampus_rag_search before answering this turn."
+            )
         )
+        return await handler(retry_request)
 
     response = await handler(request)
     if not response.result:

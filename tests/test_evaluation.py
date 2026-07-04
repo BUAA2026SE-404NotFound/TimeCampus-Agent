@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from timecampus_agent.cli import main
 from timecampus_agent.config import Settings
@@ -297,18 +297,33 @@ def test_live_empty_retrieval_fault_is_explicit_and_scoped() -> None:
     assert payload["usage"] == "fault-injected empty retrieval"
 
 
-def test_operations_middleware_forces_rag_and_appends_real_sources() -> None:
+def test_operations_middleware_retries_rag_and_appends_real_sources() -> None:
     async def exercise():
-        forced_choice = None
+        system_prompts = []
 
         async def first_handler(request):
-            nonlocal forced_choice
-            forced_choice = request.tool_choice
-            return ModelResponse(result=[AIMessage(content="", tool_calls=[])])
+            system_prompts.append(request.system_message.text)
+            if len(system_prompts) == 1:
+                return ModelResponse(result=[AIMessage(content="直接回答")])
+            return ModelResponse(
+                result=[
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": "rag-1",
+                                "name": "timecampus_rag_search",
+                                "args": {"query": "主楼旧照"},
+                            }
+                        ],
+                    )
+                ]
+            )
 
         first_request = ModelRequest(
             model=object(),
             messages=[HumanMessage(content="查询主楼旧照")],
+            system_message=SystemMessage(content="base"),
         )
         await enforce_rag_first.awrap_model_call(first_request, first_handler)
 
@@ -330,11 +345,12 @@ def test_operations_middleware_forces_rag_and_appends_real_sources() -> None:
             final_request,
             final_handler,
         )
-        return forced_choice, final_response.result[-1].content
+        return system_prompts, final_response.result[-1].content
 
-    forced_choice, content = asyncio.run(exercise())
+    system_prompts, content = asyncio.run(exercise())
 
-    assert forced_choice["function"]["name"] == "timecampus_rag_search"
+    assert len(system_prompts) == 2
+    assert "must call timecampus_rag_search" in system_prompts[-1]
     assert content.endswith("Sources: timecampus://media/9017")
 
 
