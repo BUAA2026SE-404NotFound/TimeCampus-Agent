@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain.agents.middleware import HumanInTheLoopMiddleware, wrap_model_call
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.memory import InMemorySaver
@@ -39,6 +41,54 @@ that no reliable source was found and that requested facts cannot be confirmed
 or invented; do not draft those facts.
 """
 )
+URI_PATTERN = re.compile(r"timecampus://[^\s`\"',]+")
+
+
+@wrap_model_call
+async def enforce_rag_first(request: Any, handler: Any) -> Any:
+    last_user = max(
+        (
+            index
+            for index, message in enumerate(request.messages)
+            if isinstance(message, HumanMessage)
+        ),
+        default=-1,
+    )
+    current_turn = request.messages[last_user + 1 :]
+    has_rag_result = any(
+        isinstance(message, ToolMessage) and message.name == "timecampus_rag_search"
+        for message in current_turn
+    )
+    if last_user >= 0 and not has_rag_result:
+        request = request.override(
+            tool_choice={
+                "type": "function",
+                "function": {"name": "timecampus_rag_search"},
+            }
+        )
+
+    response = await handler(request)
+    if not response.result:
+        return response
+    final = response.result[-1]
+    if not isinstance(final, AIMessage) or final.tool_calls:
+        return response
+    content = final.content if isinstance(final.content, str) else ""
+    if "Sources:" in content:
+        return response
+    uris = list(
+        dict.fromkeys(
+            uri
+            for message in current_turn
+            if isinstance(message, ToolMessage)
+            for uri in URI_PATTERN.findall(str(message.content))
+        )
+    )
+    if uris:
+        response.result[-1] = final.model_copy(
+            update={"content": content.rstrip() + "\n\nSources: " + ", ".join(uris[:5])}
+        )
+    return response
 
 
 def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:
@@ -96,6 +146,7 @@ async def build_operations_mcp_agent(
         tools=tools,
         system_prompt=prompt,
         middleware=[
+            enforce_rag_first,
             HumanInTheLoopMiddleware(
                 interrupt_on=interrupt_on,
                 description_prefix="TimeCampus write requires administrator approval",

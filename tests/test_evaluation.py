@@ -5,6 +5,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from timecampus_agent.cli import main
 from timecampus_agent.config import Settings
@@ -18,6 +20,7 @@ from timecampus_agent.evaluation.runner import (
 )
 from timecampus_agent.evaluation.scorers import score_case
 from timecampus_agent.evaluation.store import EvalStore
+from timecampus_agent.operations_runtime import enforce_rag_first
 
 
 def settings() -> Settings:
@@ -292,6 +295,47 @@ def test_live_empty_retrieval_fault_is_explicit_and_scoped() -> None:
 
     assert payload["hits"] == []
     assert payload["usage"] == "fault-injected empty retrieval"
+
+
+def test_operations_middleware_forces_rag_and_appends_real_sources() -> None:
+    async def exercise():
+        forced_choice = None
+
+        async def first_handler(request):
+            nonlocal forced_choice
+            forced_choice = request.tool_choice
+            return ModelResponse(result=[AIMessage(content="", tool_calls=[])])
+
+        first_request = ModelRequest(
+            model=object(),
+            messages=[HumanMessage(content="查询主楼旧照")],
+        )
+        await enforce_rag_first.awrap_model_call(first_request, first_handler)
+
+        async def final_handler(request):
+            return ModelResponse(result=[AIMessage(content="查到一张旧照。")])
+
+        final_request = ModelRequest(
+            model=object(),
+            messages=[
+                HumanMessage(content="查询主楼旧照"),
+                ToolMessage(
+                    name="timecampus_rag_search",
+                    content='{"uri":"timecampus://media/9017"}',
+                    tool_call_id="rag-1",
+                ),
+            ],
+        )
+        final_response = await enforce_rag_first.awrap_model_call(
+            final_request,
+            final_handler,
+        )
+        return forced_choice, final_response.result[-1].content
+
+    forced_choice, content = asyncio.run(exercise())
+
+    assert forced_choice["function"]["name"] == "timecampus_rag_search"
+    assert content.endswith("Sources: timecampus://media/9017")
 
 
 def test_eval_store_keeps_latest_runs_and_bad_case_lifecycle(tmp_path) -> None:
