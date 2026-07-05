@@ -56,7 +56,9 @@ timecampus:// URIs. Every answer based on RAG must end with a "Sources:" line
 that copies at least one exact timecampus:// URI from the tool result. Do not
 use visitor-guide POI or route tools. If RAG returns no hits, explicitly state
 that no reliable source was found and that requested facts cannot be confirmed
-or invented; do not draft those facts.
+or invented; do not draft those facts. Do not narrate tool planning or expose
+chain-of-thought. When requesting tools, emit tool calls without user-facing
+prose and reserve Markdown content for the final response.
 """
 )
 URI_PATTERN = re.compile(r"timecampus://[^\s`\"',]+")

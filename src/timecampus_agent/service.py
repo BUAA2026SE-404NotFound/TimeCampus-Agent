@@ -209,7 +209,7 @@ class AgentRuntime:
         result = dict(snapshot.values)
         result["__interrupt__"] = snapshot.interrupts
         new_messages = result.get("messages", [])[base_message_count:]
-        output = "".join(streamed).strip() or _last_ai_text(new_messages)
+        output = _last_ai_text(new_messages) or "".join(streamed).strip()
         execution = self._serialize(thread_id, result, new_messages, output=output)
         self._persist_assistant(session_id, execution["output"])
         execution["sessionId"] = session_id

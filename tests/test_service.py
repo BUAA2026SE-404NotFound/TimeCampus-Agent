@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 
 import httpx
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from timecampus_agent.config import load_settings
 from timecampus_agent.service import (
+    AgentRuntime,
     OperationDecision,
     create_app,
     tool_policy,
@@ -179,6 +182,44 @@ def test_operation_task_accepts_bulk_input_and_rejects_over_limit(tmp_path) -> N
         assert accepted.status_code == 200
         assert rejected.status_code == 422
         assert rejected.json()["detail"][0]["type"] == "string_too_long"
+
+    asyncio.run(check())
+
+
+def test_stream_persists_only_the_final_ai_message(tmp_path) -> None:
+    runtime = AgentRuntime(replace(load_settings(), memory_dir=str(tmp_path)))
+    session_id = runtime.create_session()["id"]
+
+    class FakeStreamingAgent:
+        async def astream(self, input_value, config, stream_mode):
+            yield AIMessageChunk(content="Let me inspect tools."), {}
+            yield AIMessageChunk(content="最终回答"), {}
+
+        async def aget_state(self, config):
+            return SimpleNamespace(
+                values={
+                    "messages": [
+                        AIMessage(content="Let me inspect tools."),
+                        AIMessage(content="最终回答"),
+                    ]
+                },
+                interrupts=(),
+            )
+
+    async def check() -> None:
+        events = [
+            event
+            async for event in runtime._stream_agent(
+                FakeStreamingAgent(),
+                {"messages": []},
+                "thread-1",
+                session_id,
+                0,
+            )
+        ]
+        result = next(data for event, data in events if event == "result")
+        assert result["output"] == "最终回答"
+        assert runtime.get_session(session_id)["messages"][-1]["content"] == "最终回答"
 
     asyncio.run(check())
 
