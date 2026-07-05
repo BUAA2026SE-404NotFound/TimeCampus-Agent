@@ -354,6 +354,86 @@ def test_operations_middleware_retries_rag_and_appends_real_sources() -> None:
     assert content.endswith("Sources: timecampus://media/9017")
 
 
+def test_operations_middleware_makes_bulk_first_turn_read_only() -> None:
+    class Tool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    async def exercise():
+        async def handler(request):
+            assert [tool.name for tool in request.tools] == [
+                "timecampus_rag_search",
+                "timecampus_get_poi",
+            ]
+            assert "draft-only" in request.system_message.text
+            return ModelResponse(
+                result=[
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": "rag-1",
+                                "name": "timecampus_rag_search",
+                                "args": {"query": "校园冷知识"},
+                            }
+                        ],
+                    )
+                ]
+            )
+
+        request = ModelRequest(
+            model=object(),
+            messages=[HumanMessage(content="资料" * 2_001)],
+            system_message=SystemMessage(content="base"),
+            tools=[
+                Tool("timecampus_rag_search"),
+                Tool("timecampus_get_poi"),
+                Tool("timecampus_update_poi_copy"),
+            ],
+        )
+        return await enforce_rag_first.awrap_model_call(request, handler)
+
+    response = asyncio.run(exercise())
+    assert response.result[-1].tool_calls[0]["name"] == "timecampus_rag_search"
+
+
+def test_operations_middleware_blocks_more_than_eight_writes() -> None:
+    async def exercise():
+        async def handler(request):
+            return ModelResponse(
+                result=[
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": f"write-{index}",
+                                "name": "timecampus_update_poi_copy",
+                                "args": {"poiId": index},
+                            }
+                            for index in range(9)
+                        ],
+                    )
+                ]
+            )
+
+        request = ModelRequest(
+            model=object(),
+            messages=[
+                HumanMessage(content="更新这些 POI"),
+                ToolMessage(
+                    name="timecampus_rag_search",
+                    content='{"hits":[]}',
+                    tool_call_id="rag-1",
+                ),
+            ],
+        )
+        return await enforce_rag_first.awrap_model_call(request, handler)
+
+    response = asyncio.run(exercise())
+    assert response.result[-1].tool_calls == []
+    assert "最多 8 个 POI" in response.result[-1].content
+
+
 def test_eval_store_keeps_latest_runs_and_bad_case_lifecycle(tmp_path) -> None:
     store = EvalStore(tmp_path, max_runs=2)
     summaries = [

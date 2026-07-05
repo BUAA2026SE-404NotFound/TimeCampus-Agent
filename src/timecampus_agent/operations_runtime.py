@@ -5,7 +5,13 @@ from typing import Any
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, wrap_model_call
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_deepseek import ChatDeepSeek
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.memory import InMemorySaver
@@ -26,6 +32,18 @@ READ_ONLY_TOOLS = {
     "timecampus_public_poi_search",
     "timecampus_walking_route",
 }
+BULK_DRAFT_THRESHOLD = 4_000
+MAX_WRITE_CALLS_PER_TURN = 8
+BULK_DRAFT_INSTRUCTION = """
+The current user message is bulk source material. This turn is draft-only:
+- use only read tools and do not request any write;
+- remove empty cross-references, duplicate entries, and headings without content;
+- map usable facts to existing POIs and separate accepted candidates, excluded
+  items, unresolved mappings, and batches of at most 8 POIs;
+- exclude unverifiable claims, copyright-unclear material, personal allegations,
+  sexual harassment, crime, and private-person anecdotes from public fun facts.
+The administrator must explicitly select a later batch before writes are proposed.
+"""
 
 EXECUTION_PROMPT = (
     OPERATIONS_PROMPT
@@ -54,6 +72,21 @@ async def enforce_rag_first(request: Any, handler: Any) -> Any:
         ),
         default=-1,
     )
+    current_user_text = (
+        _message_text(request.messages[last_user]) if last_user >= 0 else ""
+    )
+    if len(current_user_text) > BULK_DRAFT_THRESHOLD:
+        system_text = request.system_message.text if request.system_message else ""
+        request = request.override(
+            system_message=SystemMessage(
+                content=system_text + "\n" + BULK_DRAFT_INSTRUCTION
+            ),
+            tools=[
+                tool
+                for tool in request.tools
+                if getattr(tool, "name", "") in READ_ONLY_TOOLS
+            ],
+        )
     current_turn = request.messages[last_user + 1 :]
     has_rag_result = any(
         isinstance(message, ToolMessage) and message.name == "timecampus_rag_search"
@@ -80,6 +113,23 @@ async def enforce_rag_first(request: Any, handler: Any) -> Any:
     response = await handler(request)
     if not response.result:
         return response
+    write_calls = [
+        call
+        for message in response.result
+        if isinstance(message, AIMessage)
+        for call in message.tool_calls
+        if call.get("name") not in READ_ONLY_TOOLS
+    ]
+    if len(write_calls) > MAX_WRITE_CALLS_PER_TURN:
+        response.result[:] = [
+            AIMessage(
+                content=(
+                    "本轮包含超过 8 个写操作。请明确选择最多 8 个 POI，"
+                    "再分批生成待审批修改。"
+                )
+            )
+        ]
+        return response
     final = response.result[-1]
     if not isinstance(final, AIMessage) or final.tool_calls:
         return response
@@ -99,6 +149,10 @@ async def enforce_rag_first(request: Any, handler: Any) -> Any:
             update={"content": content.rstrip() + "\n\nSources: " + ", ".join(uris[:5])}
         )
     return response
+
+
+def _message_text(message: BaseMessage) -> str:
+    return message.content if isinstance(message.content, str) else ""
 
 
 def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:

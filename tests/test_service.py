@@ -155,6 +155,34 @@ def test_service_requires_token_and_supports_approval(tmp_path) -> None:
     asyncio.run(check())
 
 
+def test_operation_task_accepts_bulk_input_and_rejects_over_limit(tmp_path) -> None:
+    settings = replace(
+        load_settings(),
+        agent_api_token="test-token",
+        eval_report_dir=str(tmp_path),
+    )
+
+    async def check() -> None:
+        headers = {"X-TimeCampus-Agent-Token": "test-token"}
+        async with _client(settings) as client:
+            accepted = await client.post(
+                "/internal/v1/operations/runs",
+                headers=headers,
+                json={"task": "校" * 7_500},
+            )
+            rejected = await client.post(
+                "/internal/v1/operations/runs",
+                headers=headers,
+                json={"task": "校" * 20_001},
+            )
+
+        assert accepted.status_code == 200
+        assert rejected.status_code == 422
+        assert rejected.json()["detail"][0]["type"] == "string_too_long"
+
+    asyncio.run(check())
+
+
 def test_fixture_eval_api_writes_latest_report(tmp_path) -> None:
     settings = replace(
         load_settings(),

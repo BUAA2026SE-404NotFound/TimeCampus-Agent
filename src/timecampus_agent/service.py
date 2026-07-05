@@ -33,7 +33,7 @@ def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:
 
 
 class OperationRunRequest(BaseModel):
-    task: str = Field(min_length=1, max_length=4000)
+    task: str = Field(min_length=1, max_length=20_000)
     session_id: str | None = Field(default=None, alias="sessionId")
 
 
