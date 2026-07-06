@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -91,10 +92,15 @@ class AgentRuntime:
         )
         self._agent: Any | None = None
         self._client: MultiServerMCPClient | None = None
+        self._checkpointer_context: Any | None = None
+        self._checkpointer: AsyncSqliteSaver | None = None
         self._lock = asyncio.Lock()
-        self._active_threads: set[str] = set()
-        self._thread_sessions: dict[str, str] = {}
-        self._pending_runs: dict[str, dict[str, Any]] = {}
+        self._pending_runs = self.sessions.load_pending_runs()
+        self._thread_sessions = {
+            execution["threadId"]: session_id
+            for session_id, execution in self._pending_runs.items()
+        }
+        self._active_threads = set(self._thread_sessions)
         self._session_locks: dict[str, asyncio.Lock] = {}
 
     def list_sessions(self) -> list[dict[str, Any]]:
@@ -300,9 +306,17 @@ class AgentRuntime:
         execution: dict[str, Any],
     ) -> None:
         if execution["status"] == "approval_required":
-            self._pending_runs[session_id] = execution
+            self._pending_runs[session_id] = {
+                "threadId": execution["threadId"],
+                "sessionId": session_id,
+                "status": execution["status"],
+                "pendingActions": execution["pendingActions"],
+                "toolEvents": [],
+                "output": execution["output"],
+            }
         else:
             self._pending_runs.pop(session_id, None)
+        self.sessions.save_pending_runs(self._pending_runs)
 
     def _title_task(
         self,
@@ -353,13 +367,31 @@ class AgentRuntime:
             if self._agent is not None:
                 return self._agent
             try:
+                checkpointer = await self._get_checkpointer()
                 self._agent, self._client = await build_operations_mcp_agent(
                     self.settings,
                     memory_context=self.sessions.memory_context(),
+                    checkpointer=checkpointer,
                 )
             except RuntimeError as exception:
                 raise HTTPException(status_code=503, detail=str(exception)) from exception
             return self._agent
+
+    async def _get_checkpointer(self) -> AsyncSqliteSaver:
+        if self._checkpointer is not None:
+            return self._checkpointer
+        path = Path(self.settings.memory_dir) / "checkpoints.sqlite"
+        self._checkpointer_context = AsyncSqliteSaver.from_conn_string(str(path))
+        self._checkpointer = await self._checkpointer_context.__aenter__()
+        await self._checkpointer.setup()
+        path.chmod(0o600)
+        return self._checkpointer
+
+    async def close(self) -> None:
+        if self._checkpointer_context is not None:
+            await self._checkpointer_context.__aexit__(None, None, None)
+            self._checkpointer_context = None
+            self._checkpointer = None
 
     def _serialize(
         self,
@@ -393,6 +425,9 @@ def create_app(
     runtime = runtime or AgentRuntime(settings)
     eval_store = EvalStore(Path(settings.eval_report_dir))
     app = FastAPI(title="TimeCampus Agent", version="0.3.0-beta")
+
+    if hasattr(runtime, "close"):
+        app.add_event_handler("shutdown", runtime.close)
 
     def authorize(
         token: str | None = Header(default=None, alias="X-TimeCampus-Agent-Token"),

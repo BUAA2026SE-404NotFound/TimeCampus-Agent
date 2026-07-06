@@ -175,6 +175,7 @@ async def build_operations_mcp_agent(
     *,
     memory_context: str = "",
     extra_middleware: list[Any] | None = None,
+    checkpointer: Any | None = None,
 ) -> tuple[Any, MultiServerMCPClient]:
     if not settings.chat_api_key:
         raise RuntimeError("TIMECAMPUS_CHAT_API_KEY is not configured.")
@@ -219,7 +220,7 @@ async def build_operations_mcp_agent(
             ),
             *(extra_middleware or []),
         ],
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer or InMemorySaver(),
         name="operations_executor",
     )
     return agent, client

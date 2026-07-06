@@ -6,6 +6,9 @@ from types import SimpleNamespace
 
 import httpx
 from langchain_core.messages import AIMessage, AIMessageChunk
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
+from typing_extensions import TypedDict
 
 from timecampus_agent.config import load_settings
 from timecampus_agent.service import (
@@ -243,12 +246,48 @@ def test_pending_approval_is_recovered_from_session(tmp_path) -> None:
 
     assert runtime.get_session(session_id)["pendingRun"] == pending
     assert runtime.list_sessions()[0]["hasPendingApproval"] is True
+    restarted = AgentRuntime(replace(load_settings(), memory_dir=str(tmp_path)))
+    assert restarted.get_session(session_id)["pendingRun"]["threadId"] == "thread-pending"
+    assert "thread-pending" in restarted._active_threads
 
     runtime._remember_execution(
         session_id,
         {**pending, "status": "completed", "pendingActions": []},
     )
     assert runtime.get_session(session_id)["pendingRun"] is None
+
+
+def test_sqlite_checkpointer_resumes_after_runtime_restart(tmp_path) -> None:
+    class State(TypedDict):
+        decision: str
+
+    def approval_node(_state: State) -> State:
+        return {"decision": interrupt({"action": "write"})}
+
+    def graph(checkpointer):
+        builder = StateGraph(State)
+        builder.add_node("approval", approval_node)
+        builder.add_edge(START, "approval")
+        builder.add_edge("approval", END)
+        return builder.compile(checkpointer=checkpointer)
+
+    settings = replace(load_settings(), memory_dir=str(tmp_path))
+    config = {"configurable": {"thread_id": "durable-thread"}}
+
+    async def check() -> None:
+        first_runtime = AgentRuntime(settings)
+        first_graph = graph(await first_runtime._get_checkpointer())
+        interrupted = await first_graph.ainvoke({"decision": ""}, config)
+        assert interrupted["__interrupt__"]
+        await first_runtime.close()
+
+        second_runtime = AgentRuntime(settings)
+        second_graph = graph(await second_runtime._get_checkpointer())
+        resumed = await second_graph.ainvoke(Command(resume="approve"), config)
+        assert resumed["decision"] == "approve"
+        await second_runtime.close()
+
+    asyncio.run(check())
 
 
 def test_first_message_uses_generated_session_title(tmp_path) -> None:

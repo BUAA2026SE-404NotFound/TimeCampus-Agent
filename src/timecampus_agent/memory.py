@@ -20,6 +20,7 @@ class SessionStore:
         self.root = root
         self.sessions_dir = root / "sessions"
         self.memory_file = root / "MEMORY.md"
+        self.pending_file = root / "pending-runs.json"
         self.history_limit = max(2, history_limit)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -117,6 +118,35 @@ class SessionStore:
             return self.memory_file.read_text(encoding="utf-8")[:MAX_MEMORY_CHARS].strip()
         except OSError:
             return ""
+
+    def load_pending_runs(self) -> dict[str, dict[str, Any]]:
+        try:
+            value = json.loads(self.pending_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {
+            session_id: execution
+            for session_id, execution in value.items()
+            if isinstance(session_id, str)
+            and isinstance(execution, dict)
+            and isinstance(execution.get("threadId"), str)
+            and execution.get("status") == "approval_required"
+        }
+
+    def save_pending_runs(self, pending: dict[str, dict[str, Any]]) -> None:
+        temporary = self.pending_file.with_suffix(".json.tmp")
+        with self._lock:
+            try:
+                temporary.write_text(
+                    json.dumps(pending, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                os.replace(temporary, self.pending_file)
+                self.pending_file.chmod(0o600)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def _path(self, session_id: str) -> Path:
         try:

@@ -58,3 +58,18 @@ def test_session_store_updates_generated_title(tmp_path) -> None:
     store.set_title(session["id"], "主楼冷知识整理")
 
     assert store.get(session["id"])["title"] == "主楼冷知识整理"
+
+
+def test_session_store_persists_pending_runs(tmp_path) -> None:
+    store = SessionStore(tmp_path)
+    pending = {
+        "session-1": {
+            "threadId": "thread-1",
+            "status": "approval_required",
+            "pendingActions": [],
+        }
+    }
+
+    store.save_pending_runs(pending)
+
+    assert SessionStore(tmp_path).load_pending_runs() == pending
