@@ -39,13 +39,18 @@ class SessionStore:
             self._write(session)
         return self._summary(session)
 
-    def list(self) -> list[dict[str, Any]]:
+    def list(self, include_ids: set[str] | None = None) -> list[dict[str, Any]]:
+        include_ids = include_ids or set()
         sessions: list[dict[str, Any]] = []
         with self._lock:
             for path in self.sessions_dir.glob("*.jsonl"):
                 session = self._read_path(path)
-                if session and any(
-                    message["role"] == "assistant" for message in session["messages"]
+                if session and (
+                    session["id"] in include_ids
+                    or any(
+                        message["role"] == "assistant"
+                        for message in session["messages"]
+                    )
                 ):
                     sessions.append(self._summary(session))
         return sorted(sessions, key=lambda item: item["updatedAt"], reverse=True)
@@ -82,6 +87,19 @@ class SessionStore:
             if role == "user" and not session["messages"][:-1]:
                 session["title"] = _title(normalized) or session["title"]
             session["updatedAt"] = timestamp
+            self._write(session)
+            return session
+
+    def set_title(self, session_id: str, title: str) -> dict[str, Any]:
+        normalized = _title(title)
+        if not normalized:
+            raise ValueError("Session title cannot be blank.")
+        with self._lock:
+            session = self._read_path(self._path(session_id))
+            if not session:
+                raise KeyError(session_id)
+            session["title"] = normalized
+            session["updatedAt"] = _now()
             self._write(session)
             return session
 

@@ -73,7 +73,7 @@ class FakeRuntime:
             ],
         }
 
-    def record_message(self, session_id: str, role: str, content: str) -> dict:
+    async def record_message(self, session_id: str, role: str, content: str) -> dict:
         return {
             **self.get_session(session_id),
             "messages": [
@@ -222,6 +222,65 @@ def test_stream_persists_only_the_final_ai_message(tmp_path) -> None:
         assert runtime.get_session(session_id)["messages"][-1]["content"] == "最终回答"
 
     asyncio.run(check())
+
+
+def test_pending_approval_is_recovered_from_session(tmp_path) -> None:
+    runtime = AgentRuntime(replace(load_settings(), memory_dir=str(tmp_path)))
+    session_id = runtime.create_session()["id"]
+    runtime.sessions.append(session_id, "user", "更新主楼文案")
+    pending = {
+        "threadId": "thread-pending",
+        "sessionId": session_id,
+        "status": "approval_required",
+        "pendingActions": [
+            {"name": "timecampus_update_poi_copy", "arguments": {"poiId": 1}}
+        ],
+        "toolEvents": [],
+        "output": "等待审批",
+    }
+
+    runtime._remember_execution(session_id, pending)
+
+    assert runtime.get_session(session_id)["pendingRun"] == pending
+    assert runtime.list_sessions()[0]["hasPendingApproval"] is True
+
+    runtime._remember_execution(
+        session_id,
+        {**pending, "status": "completed", "pendingActions": []},
+    )
+    assert runtime.get_session(session_id)["pendingRun"] is None
+
+
+def test_first_message_uses_generated_session_title(tmp_path) -> None:
+    settings = replace(
+        load_settings(),
+        memory_dir=str(tmp_path),
+        chat_api_key="test-key",
+    )
+    runtime = AgentRuntime(settings)
+    session_id = runtime.create_session()["id"]
+
+    async def summarize(session: str, task: str) -> None:
+        assert task == "整理主楼冷知识并等待审批"
+        runtime.sessions.set_title(session, "主楼冷知识整理")
+
+    runtime._summarize_title = summarize
+
+    async def check() -> None:
+        _, first = runtime._append_user_and_history(
+            session_id,
+            "整理主楼冷知识并等待审批",
+        )
+        await runtime._finish_title_task(
+            runtime._title_task(
+                session_id,
+                "整理主楼冷知识并等待审批",
+                first,
+            )
+        )
+
+    asyncio.run(check())
+    assert runtime.get_session(session_id)["title"] == "主楼冷知识整理"
 
 
 def test_fixture_eval_api_writes_latest_report(tmp_path) -> None:

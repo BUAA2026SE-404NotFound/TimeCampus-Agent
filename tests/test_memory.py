@@ -48,3 +48,13 @@ def test_session_store_does_not_list_empty_sessions(tmp_path) -> None:
 
     store.append(session["id"], "assistant", "已完成主楼资料检索")
     assert [item["id"] for item in store.list()] == [session["id"]]
+
+
+def test_session_store_updates_generated_title(tmp_path) -> None:
+    store = SessionStore(tmp_path)
+    session = store.create()
+    store.append(session["id"], "user", "一段非常长的运营任务正文")
+
+    store.set_title(session["id"], "主楼冷知识整理")
+
+    assert store.get(session["id"])["title"] == "主楼冷知识整理"
