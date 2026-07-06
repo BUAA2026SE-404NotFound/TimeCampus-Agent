@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -424,10 +425,20 @@ def create_app(
     settings = settings or load_settings()
     runtime = runtime or AgentRuntime(settings)
     eval_store = EvalStore(Path(settings.eval_report_dir))
-    app = FastAPI(title="TimeCampus Agent", version="0.3.0-beta")
 
-    if hasattr(runtime, "close"):
-        app.add_event_handler("shutdown", runtime.close)
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            if hasattr(runtime, "close"):
+                await runtime.close()
+
+    app = FastAPI(
+        title="TimeCampus Agent",
+        version="0.3.0-beta",
+        lifespan=lifespan,
+    )
 
     def authorize(
         token: str | None = Header(default=None, alias="X-TimeCampus-Agent-Token"),

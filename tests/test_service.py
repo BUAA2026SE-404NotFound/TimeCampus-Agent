@@ -431,6 +431,30 @@ def test_eval_stream_history_and_bad_case_api(tmp_path) -> None:
     asyncio.run(check())
 
 
+def test_app_lifespan_closes_runtime(tmp_path) -> None:
+    class ClosingRuntime(FakeRuntime):
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    settings = replace(
+        load_settings(),
+        agent_api_token="secret",
+        eval_report_dir=str(tmp_path),
+    )
+    runtime = ClosingRuntime()
+    app = create_app(settings, runtime)
+
+    async def run_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            pass
+
+    asyncio.run(run_lifespan())
+
+    assert runtime.closed is True
+
+
 def _client(settings):
     app = create_app(settings, FakeRuntime())
     return httpx.AsyncClient(
