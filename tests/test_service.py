@@ -2,13 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from types import SimpleNamespace
 
 import httpx
-from langchain_core.messages import AIMessage, AIMessageChunk
-from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, interrupt
-from typing_extensions import TypedDict
 
 from timecampus_agent.config import load_settings
 from timecampus_agent.service import (
@@ -193,31 +188,18 @@ def test_stream_persists_only_the_final_ai_message(tmp_path) -> None:
     runtime = AgentRuntime(replace(load_settings(), memory_dir=str(tmp_path)))
     session_id = runtime.create_session()["id"]
 
-    class FakeStreamingAgent:
-        async def astream(self, input_value, config, stream_mode):
-            yield AIMessageChunk(content="Let me inspect tools."), {}
-            yield AIMessageChunk(content="最终回答"), {}
-
-        async def aget_state(self, config):
-            return SimpleNamespace(
-                values={
-                    "messages": [
-                        AIMessage(content="Let me inspect tools."),
-                        AIMessage(content="最终回答"),
-                    ]
-                },
-                interrupts=(),
-            )
-
     async def check() -> None:
         events = [
             event
-            async for event in runtime._stream_agent(
-                FakeStreamingAgent(),
-                {"messages": []},
-                "thread-1",
+            async for event in runtime._result_events(
                 session_id,
-                0,
+                {
+                    "threadId": "thread-1",
+                    "status": "completed",
+                    "pendingActions": [],
+                    "toolEvents": [],
+                    "output": "最终回答",
+                },
             )
         ]
         result = next(data for event, data in events if event == "result")
@@ -257,35 +239,42 @@ def test_pending_approval_is_recovered_from_session(tmp_path) -> None:
     assert runtime.get_session(session_id)["pendingRun"] is None
 
 
-def test_sqlite_checkpointer_resumes_after_runtime_restart(tmp_path) -> None:
-    class State(TypedDict):
-        decision: str
-
-    def approval_node(_state: State) -> State:
-        return {"decision": interrupt({"action": "write"})}
-
-    def graph(checkpointer):
-        builder = StateGraph(State)
-        builder.add_node("approval", approval_node)
-        builder.add_edge(START, "approval")
-        builder.add_edge("approval", END)
-        return builder.compile(checkpointer=checkpointer)
-
+def test_pending_state_resumes_after_runtime_restart(tmp_path) -> None:
     settings = replace(load_settings(), memory_dir=str(tmp_path))
-    config = {"configurable": {"thread_id": "durable-thread"}}
+    first_runtime = AgentRuntime(settings)
+    session_id = first_runtime.create_session()["id"]
+    first_runtime.sessions.append(session_id, "user", "更新主楼文案")
+    pending = {
+        "threadId": "durable-thread",
+        "sessionId": session_id,
+        "status": "approval_required",
+        "pendingActions": [{"name": "timecampus_update_poi_copy", "arguments": {"poiId": 1}}],
+        "toolEvents": [],
+        "output": "等待审批",
+    }
+    state = {"messages": [{"role": "user", "content": "更新主楼文案"}], "pendingToolCalls": []}
+    first_runtime._remember_execution(session_id, pending, state)
 
     async def check() -> None:
-        first_runtime = AgentRuntime(settings)
-        first_graph = graph(await first_runtime._get_checkpointer())
-        interrupted = await first_graph.ainvoke({"decision": ""}, config)
-        assert interrupted["__interrupt__"]
-        await first_runtime.close()
+        class FakeAgent:
+            async def resume(self, saved_state, decisions, *, thread_id):
+                assert saved_state == state
+                assert decisions[0]["type"] == "approve"
+                return {
+                    "threadId": thread_id,
+                    "status": "completed",
+                    "pendingActions": [],
+                    "toolEvents": [],
+                    "output": "已执行",
+                }
 
         second_runtime = AgentRuntime(settings)
-        second_graph = graph(await second_runtime._get_checkpointer())
-        resumed = await second_graph.ainvoke(Command(resume="approve"), config)
-        assert resumed["decision"] == "approve"
-        await second_runtime.close()
+        second_runtime._agent = FakeAgent()
+        resumed = await second_runtime.resume(
+            "durable-thread",
+            [OperationDecision(type="approve")],
+        )
+        assert resumed["output"] == "已执行"
 
     asyncio.run(check())
 

@@ -20,7 +20,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="timecampus-agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    ask_parser = subparsers.add_parser("ask", help="Run the LangGraph agent.")
+    ask_parser = subparsers.add_parser("ask", help="Run the Python agent.")
     ask_parser.add_argument("prompt")
     ask_parser.add_argument("--agent", choices=["auto", "operations", "guide"], default="auto")
 

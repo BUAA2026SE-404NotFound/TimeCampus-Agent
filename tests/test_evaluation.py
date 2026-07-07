@@ -5,8 +5,6 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from langchain.agents.middleware.types import ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from timecampus_agent.cli import main
 from timecampus_agent.config import Settings
@@ -20,7 +18,8 @@ from timecampus_agent.evaluation.runner import (
 )
 from timecampus_agent.evaluation.scorers import score_case
 from timecampus_agent.evaluation.store import EvalStore
-from timecampus_agent.operations_runtime import enforce_rag_first
+from timecampus_agent.operations_runtime import PurePythonOperationsAgent
+from timecampus_agent.tools import ToolSpec
 
 
 def settings() -> Settings:
@@ -278,20 +277,9 @@ def test_live_retrieval_target_parses_mcp_hits() -> None:
 
 
 def test_live_empty_retrieval_fault_is_explicit_and_scoped() -> None:
-    class Request:
-        tool_call = {
-            "id": "call-1",
-            "name": "timecampus_rag_search",
-            "args": {"query": "量子纪念馆 1958"},
-        }
-
-    async def unexpected_handler(request):
-        raise AssertionError("fault-injected call must not reach MCP")
-
-    message = asyncio.run(
-        _inject_live_eval_failures.awrap_tool_call(Request(), unexpected_handler)
+    payload = asyncio.run(
+        _inject_live_eval_failures("timecampus_rag_search", {"query": "量子纪念馆 1958"})
     )
-    payload = json.loads(message.content)
 
     assert payload["hits"] == []
     assert payload["usage"] == "fault-injected empty retrieval"
@@ -299,139 +287,98 @@ def test_live_empty_retrieval_fault_is_explicit_and_scoped() -> None:
 
 def test_operations_middleware_retries_rag_and_appends_real_sources() -> None:
     async def exercise():
-        system_prompts = []
+        class Model:
+            async def complete(self, messages, tools=None):
+                return {"role": "assistant", "content": "查到一张旧照。"}
 
-        async def first_handler(request):
-            system_prompts.append(request.system_message.text)
-            if len(system_prompts) == 1:
-                return ModelResponse(result=[AIMessage(content="直接回答")])
-            return ModelResponse(
-                result=[
-                    AIMessage(
-                        content="",
-                        tool_calls=[
-                            {
-                                "id": "rag-1",
-                                "name": "timecampus_rag_search",
-                                "args": {"query": "主楼旧照"},
-                            }
-                        ],
-                    )
-                ]
-            )
+        async def rag(_arguments):
+            return '{"uri":"timecampus://media/9017"}'
 
-        first_request = ModelRequest(
-            model=object(),
-            messages=[HumanMessage(content="查询主楼旧照")],
-            system_message=SystemMessage(content="base"),
-        )
-        await enforce_rag_first.awrap_model_call(first_request, first_handler)
-
-        async def final_handler(request):
-            return ModelResponse(result=[AIMessage(content="查到一张旧照。")])
-
-        final_request = ModelRequest(
-            model=object(),
-            messages=[
-                HumanMessage(content="查询主楼旧照"),
-                ToolMessage(
-                    name="timecampus_rag_search",
-                    content='{"uri":"timecampus://media/9017"}',
-                    tool_call_id="rag-1",
-                ),
+        agent = PurePythonOperationsAgent(
+            Model(),
+            [
+                ToolSpec(
+                    "timecampus_rag_search",
+                    "rag",
+                    {"type": "object", "properties": {}},
+                    rag,
+                )
             ],
+            "base",
         )
-        final_response = await enforce_rag_first.awrap_model_call(
-            final_request,
-            final_handler,
+        return await agent.run(
+            [{"role": "user", "content": "查询主楼旧照"}],
+            thread_id="thread-1",
         )
-        return system_prompts, final_response.result[-1].content
 
-    system_prompts, content = asyncio.run(exercise())
+    result = asyncio.run(exercise())
 
-    assert len(system_prompts) == 2
-    assert "must call timecampus_rag_search" in system_prompts[-1]
-    assert content.endswith("Sources: timecampus://media/9017")
+    assert result["toolEvents"][0]["name"] == "timecampus_rag_search"
+    assert result["output"].endswith("Sources: timecampus://media/9017")
 
 
 def test_operations_middleware_makes_bulk_first_turn_read_only() -> None:
-    class Tool:
-        def __init__(self, name: str) -> None:
-            self.name = name
-
     async def exercise():
-        async def handler(request):
-            assert [tool.name for tool in request.tools] == [
-                "timecampus_rag_search",
-                "timecampus_get_poi",
-            ]
-            assert "draft-only" in request.system_message.text
-            return ModelResponse(
-                result=[
-                    AIMessage(
-                        content="",
-                        tool_calls=[
-                            {
-                                "id": "rag-1",
-                                "name": "timecampus_rag_search",
-                                "args": {"query": "校园冷知识"},
-                            }
-                        ],
-                    )
+        class Model:
+            async def complete(self, messages, tools=None):
+                assert [tool["function"]["name"] for tool in tools] == [
+                    "timecampus_rag_search",
                 ]
-            )
+                assert "draft-only" in messages[0]["content"]
+                return {"role": "assistant", "content": "done"}
 
-        request = ModelRequest(
-            model=object(),
-            messages=[HumanMessage(content="资料" * 2_001)],
-            system_message=SystemMessage(content="base"),
+        async def ok(_arguments):
+            return "{}"
+
+        agent = PurePythonOperationsAgent(
+            Model(),
             tools=[
-                Tool("timecampus_rag_search"),
-                Tool("timecampus_get_poi"),
-                Tool("timecampus_update_poi_copy"),
+                ToolSpec("timecampus_rag_search", "rag", {}, ok),
+                ToolSpec("timecampus_update_poi_copy", "write", {}, ok),
             ],
+            prompt="base",
         )
-        return await enforce_rag_first.awrap_model_call(request, handler)
+        return await agent.run([{"role": "user", "content": "资料" * 2_001}], thread_id="t")
 
-    response = asyncio.run(exercise())
-    assert response.result[-1].tool_calls[0]["name"] == "timecampus_rag_search"
+    assert asyncio.run(exercise())["status"] == "completed"
 
 
 def test_operations_middleware_blocks_more_than_eight_writes() -> None:
     async def exercise():
-        async def handler(request):
-            return ModelResponse(
-                result=[
-                    AIMessage(
-                        content="",
-                        tool_calls=[
-                            {
-                                "id": f"write-{index}",
+        class Model:
+            async def complete(self, messages, tools=None):
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"write-{index}",
+                            "type": "function",
+                            "function": {
                                 "name": "timecampus_update_poi_copy",
-                                "args": {"poiId": index},
-                            }
-                            for index in range(9)
-                        ],
-                    )
-                ]
-            )
+                                "arguments": json.dumps({"poiId": index}),
+                            },
+                        }
+                        for index in range(9)
+                    ],
+                }
 
-        request = ModelRequest(
-            model=object(),
-            messages=[
-                HumanMessage(content="更新这些 POI"),
-                ToolMessage(
-                    name="timecampus_rag_search",
-                    content='{"hits":[]}',
-                    tool_call_id="rag-1",
-                ),
+        async def ok(_arguments):
+            return "{}"
+
+        agent = PurePythonOperationsAgent(
+            Model(),
+            [
+                ToolSpec("timecampus_rag_search", "rag", {}, ok),
+                ToolSpec("timecampus_update_poi_copy", "write", {}, ok),
             ],
+            "base",
         )
-        return await enforce_rag_first.awrap_model_call(request, handler)
+        return await agent.run([{"role": "user", "content": "更新这些 POI"}], thread_id="t")
 
     response = asyncio.run(exercise())
-    assert response.result[-1].tool_calls == []
-    assert "最多 8 个 POI" in response.result[-1].content
+    assert response["status"] == "completed"
+    assert "最多 8 个 POI" in response["output"]
 
 
 def test_eval_store_keeps_latest_runs_and_bad_case_lifecycle(tmp_path) -> None:

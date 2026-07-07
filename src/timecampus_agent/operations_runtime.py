@@ -1,23 +1,17 @@
 from __future__ import annotations
 
+import inspect
+import json
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
-
-from langchain.agents import create_agent
-from langchain.agents.middleware import HumanInTheLoopMiddleware, wrap_model_call
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
-from langchain_deepseek import ChatDeepSeek
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.checkpoint.memory import InMemorySaver
+from uuid import uuid4
 
 from timecampus_agent.agent import OPERATIONS_PROMPT
 from timecampus_agent.config import Settings
+from timecampus_agent.llm import ChatClient
+from timecampus_agent.mcp_client import McpStreamableHttpClient
+from timecampus_agent.tools import ToolSpec
 
 BLOCKED_TOOLS = {"timecampus_delete_poi", "timecampus_delete_media"}
 GUIDE_ONLY_TOOLS = {"timecampus_public_poi_search", "timecampus_walking_route"}
@@ -34,6 +28,7 @@ READ_ONLY_TOOLS = {
 }
 BULK_DRAFT_THRESHOLD = 4_000
 MAX_WRITE_CALLS_PER_TURN = 8
+MAX_AGENT_STEPS = 8
 BULK_DRAFT_INSTRUCTION = """
 The current user message is bulk source material. This turn is draft-only:
 - use only read tools and do not request any write;
@@ -62,99 +57,196 @@ prose and reserve Markdown content for the final response.
 """
 )
 URI_PATTERN = re.compile(r"timecampus://[^\s`\"',]+")
+ToolOverride = Callable[[str, dict[str, Any]], Any | Awaitable[Any | None] | None]
 
 
-@wrap_model_call
-async def enforce_rag_first(request: Any, handler: Any) -> Any:
-    last_user = max(
-        (
-            index
-            for index, message in enumerate(request.messages)
-            if isinstance(message, HumanMessage)
-        ),
-        default=-1,
-    )
-    current_user_text = (
-        _message_text(request.messages[last_user]) if last_user >= 0 else ""
-    )
-    if len(current_user_text) > BULK_DRAFT_THRESHOLD:
-        system_text = request.system_message.text if request.system_message else ""
-        request = request.override(
-            system_message=SystemMessage(
-                content=system_text + "\n" + BULK_DRAFT_INSTRUCTION
-            ),
-            tools=[
-                tool
-                for tool in request.tools
-                if getattr(tool, "name", "") in READ_ONLY_TOOLS
-            ],
-        )
-    current_turn = request.messages[last_user + 1 :]
-    has_rag_result = any(
-        isinstance(message, ToolMessage) and message.name == "timecampus_rag_search"
-        for message in current_turn
-    )
-    if last_user >= 0 and not has_rag_result:
-        response = await handler(request)
-        if any(
-            call.get("name") == "timecampus_rag_search"
-            for message in response.result
-            if isinstance(message, AIMessage)
-            for call in message.tool_calls
-        ):
-            return response
-        system_text = request.system_message.text if request.system_message else ""
-        retry_request = request.override(
-            system_message=SystemMessage(
-                content=system_text
-                + "\nYou must call timecampus_rag_search before answering this turn."
+class PurePythonOperationsAgent:
+    def __init__(
+        self,
+        model: ChatClient,
+        tools: list[ToolSpec],
+        prompt: str,
+        *,
+        tool_overrides: list[ToolOverride] | None = None,
+    ) -> None:
+        self.model = model
+        self.tools = {tool.name: tool for tool in tools}
+        self.prompt = prompt
+        self.tool_overrides = tool_overrides or []
+
+    async def run(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        thread_id: str,
+    ) -> dict[str, Any]:
+        user_text = _last_user_text(messages)
+        available = self._available_tools(user_text)
+        turn_messages: list[dict[str, Any]] = []
+        tool_events: list[dict[str, Any]] = []
+        await self._rag_first(user_text, turn_messages, tool_events)
+
+        for _ in range(MAX_AGENT_STEPS):
+            response = await self.model.complete(
+                [{"role": "system", "content": self._prompt(user_text)}, *messages, *turn_messages],
+                [tool.openai_schema() for tool in available.values()],
             )
-        )
-        return await handler(retry_request)
+            turn_messages.append(response)
+            calls = _tool_calls(response)
+            if not calls:
+                output = _append_sources(_content_text(response.get("content")), turn_messages)
+                turn_messages[-1] = {**response, "content": output}
+                return _completed(thread_id, turn_messages, tool_events, output)
 
-    response = await handler(request)
-    if not response.result:
-        return response
-    write_calls = [
-        call
-        for message in response.result
-        if isinstance(message, AIMessage)
-        for call in message.tool_calls
-        if call.get("name") not in READ_ONLY_TOOLS
-    ]
-    if len(write_calls) > MAX_WRITE_CALLS_PER_TURN:
-        response.result[:] = [
-            AIMessage(
-                content=(
-                    "本轮包含超过 8 个写操作。请明确选择最多 8 个 POI，"
-                    "再分批生成待审批修改。"
-                )
+            write_calls = [call for call in calls if _is_write_call(call, available)]
+            if len(write_calls) > MAX_WRITE_CALLS_PER_TURN:
+                output = "本轮包含超过 8 个写操作。请明确选择最多 8 个 POI，再分批生成待审批修改。"
+                turn_messages.append({"role": "assistant", "content": output})
+                return _completed(thread_id, turn_messages, tool_events, output)
+            if write_calls:
+                pending = [_pending_action(call, available[_tool_name(call)]) for call in write_calls]
+                output = _content_text(response.get("content")) or "等待管理员审批。"
+                return {
+                    "threadId": thread_id,
+                    "status": "approval_required",
+                    "messages": turn_messages,
+                    "pendingActions": pending,
+                    "toolEvents": tool_events,
+                    "output": output,
+                    "pendingState": {
+                        "messages": [*messages, *turn_messages],
+                        "pendingToolCalls": write_calls,
+                    },
+                }
+
+            for call in calls:
+                message, event = await self._execute_tool_call(call, available)
+                turn_messages.append(message)
+                if event:
+                    tool_events.append(event)
+
+        output = "工具调用轮次过多，请缩小任务范围后重试。"
+        turn_messages.append({"role": "assistant", "content": output})
+        return _completed(thread_id, turn_messages, tool_events, output)
+
+    async def resume(
+        self,
+        state: dict[str, Any],
+        decisions: list[dict[str, Any]],
+        *,
+        thread_id: str,
+    ) -> dict[str, Any]:
+        messages = [item for item in state.get("messages", []) if isinstance(item, dict)]
+        calls = [item for item in state.get("pendingToolCalls", []) if isinstance(item, dict)]
+        tool_messages: list[dict[str, Any]] = []
+        tool_events: list[dict[str, Any]] = []
+        for index, call in enumerate(calls):
+            decision = decisions[min(index, len(decisions) - 1)] if decisions else {"type": "reject"}
+            if decision.get("type") == "approve":
+                message, event = await self._execute_tool_call(call, self.tools)
+            else:
+                message = {
+                    "role": "tool",
+                    "tool_call_id": str(call.get("id") or uuid4()),
+                    "name": _tool_name(call),
+                    "content": json.dumps(
+                        {"status": "rejected", "message": decision.get("message") or ""},
+                        ensure_ascii=False,
+                    ),
+                }
+                event = _tool_event(message, status="interrupted")
+            tool_messages.append(message)
+            if event:
+                tool_events.append(event)
+
+        try:
+            response = await self.model.complete(
+                [
+                    {"role": "system", "content": self.prompt},
+                    *messages,
+                    *tool_messages,
+                    {
+                        "role": "user",
+                        "content": "请基于审批结果生成简短中文总结，只列出已执行、已拒绝和后续建议。",
+                    },
+                ],
+                None,
             )
-        ]
-        return response
-    final = response.result[-1]
-    if not isinstance(final, AIMessage) or final.tool_calls:
-        return response
-    content = final.content if isinstance(final.content, str) else ""
-    if "Sources:" in content:
-        return response
-    uris = list(
-        dict.fromkeys(
-            uri
-            for message in current_turn
-            if isinstance(message, ToolMessage)
-            for uri in URI_PATTERN.findall(str(message.content))
-        )
-    )
-    if uris:
-        response.result[-1] = final.model_copy(
-            update={"content": content.rstrip() + "\n\nSources: " + ", ".join(uris[:5])}
-        )
-    return response
+            output = _content_text(response.get("content")) or _resume_fallback(tool_events)
+            result_messages = [*tool_messages, {**response, "content": output}]
+        except Exception:
+            output = _resume_fallback(tool_events)
+            result_messages = [*tool_messages, {"role": "assistant", "content": output}]
 
+        return _completed(thread_id, result_messages, tool_events, output)
 
-def _message_text(message: BaseMessage) -> str:
-    return message.content if isinstance(message.content, str) else ""
+    def _available_tools(self, user_text: str) -> dict[str, ToolSpec]:
+        tools = {
+            name: tool
+            for name, tool in self.tools.items()
+            if name not in BLOCKED_TOOLS and name not in GUIDE_ONLY_TOOLS
+        }
+        if len(user_text) > BULK_DRAFT_THRESHOLD:
+            tools = {name: tool for name, tool in tools.items() if name in READ_ONLY_TOOLS}
+        return tools
+
+    def _prompt(self, user_text: str) -> str:
+        if len(user_text) > BULK_DRAFT_THRESHOLD:
+            return self.prompt + "\n" + BULK_DRAFT_INSTRUCTION
+        return self.prompt
+
+    async def _rag_first(
+        self,
+        user_text: str,
+        turn_messages: list[dict[str, Any]],
+        tool_events: list[dict[str, Any]],
+    ) -> None:
+        tool = self.tools.get("timecampus_rag_search")
+        if tool is None:
+            return
+        call = _tool_call(
+            "timecampus_rag_search",
+            {
+                "query": user_text[:2_000] or "TimeCampus maintenance task",
+                "limit": 6,
+                "types": ["poi", "media", "comment", "guideline", "knowledge"],
+                "includePending": True,
+            },
+        )
+        turn_messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
+        message, event = await self._execute_tool_call(call, self.tools)
+        turn_messages.append(message)
+        if event:
+            tool_events.append(event)
+
+    async def _execute_tool_call(
+        self,
+        call: dict[str, Any],
+        available: dict[str, ToolSpec],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        name = _tool_name(call)
+        tool = available.get(name)
+        if tool is None or name in BLOCKED_TOOLS:
+            content = json.dumps({"error": f"Tool is not allowed: {name}"}, ensure_ascii=False)
+            message = _tool_message(call, name, content)
+            return message, _tool_event(message, status="error")
+        try:
+            content = _content_text(await self._call_tool(tool, _tool_arguments(call)))
+            message = _tool_message(call, name, content)
+            return message, _tool_event(message, status="executed")
+        except Exception as exception:
+            content = json.dumps({"error": str(exception)}, ensure_ascii=False)
+            message = _tool_message(call, name, content)
+            return message, _tool_event(message, status="error")
+
+    async def _call_tool(self, tool: ToolSpec, arguments: dict[str, Any]) -> Any:
+        for override in self.tool_overrides:
+            value = override(tool.name, arguments)
+            if inspect.isawaitable(value):
+                value = await value
+            if value is not None:
+                return value
+        return await tool.ainvoke(arguments)
 
 
 def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:
@@ -174,53 +266,189 @@ async def build_operations_mcp_agent(
     settings: Settings,
     *,
     memory_context: str = "",
-    extra_middleware: list[Any] | None = None,
-    checkpointer: Any | None = None,
-) -> tuple[Any, MultiServerMCPClient]:
+    tool_overrides: list[ToolOverride] | None = None,
+) -> tuple[PurePythonOperationsAgent, McpStreamableHttpClient]:
     if not settings.chat_api_key:
         raise RuntimeError("TIMECAMPUS_CHAT_API_KEY is not configured.")
-    headers = (
-        {"X-TimeCampus-MCP-Token": settings.mcp_token}
-        if settings.mcp_token
-        else {}
-    )
-    client = MultiServerMCPClient(
-        {
-            "timecampus": {
-                "transport": "http",
-                "url": settings.mcp_url,
-                "headers": headers,
-            }
-        }
-    )
-    operations_tools = [
-        tool for tool in await client.get_tools() if tool.name not in GUIDE_ONLY_TOOLS
+    client = McpStreamableHttpClient(settings.mcp_url, token=settings.mcp_token)
+    tools = [
+        _mcp_tool(client, info)
+        for info in await client.list_tools()
+        if info.name not in GUIDE_ONLY_TOOLS and info.name not in BLOCKED_TOOLS
     ]
-    tools, interrupt_on = tool_policy(operations_tools)
     if not tools:
         raise RuntimeError("Backend MCP returned no tools.")
     prompt = EXECUTION_PROMPT
     if memory_context:
         prompt += f"\n\n# Persistent operator memory\n{memory_context}"
-    model = ChatDeepSeek(
-        api_key=settings.chat_api_key,
-        base_url=settings.chat_base_url,
-        model=settings.chat_model,
-        temperature=settings.chat_temperature,
+    return (
+        PurePythonOperationsAgent(
+            ChatClient(settings),
+            tools,
+            prompt,
+            tool_overrides=tool_overrides,
+        ),
+        client,
     )
-    agent = create_agent(
-        model=model,
-        tools=tools,
-        system_prompt=prompt,
-        middleware=[
-            enforce_rag_first,
-            HumanInTheLoopMiddleware(
-                interrupt_on=interrupt_on,
-                description_prefix="TimeCampus write requires administrator approval",
-            ),
-            *(extra_middleware or []),
-        ],
-        checkpointer=checkpointer or InMemorySaver(),
-        name="operations_executor",
+
+
+def _mcp_tool(client: McpStreamableHttpClient, info: Any) -> ToolSpec:
+    async def call(arguments: dict[str, Any]) -> str:
+        return json.dumps(_extract_mcp_tool_result(await client.call_tool(info.name, arguments)), ensure_ascii=False)
+
+    return ToolSpec(
+        name=info.name,
+        description=info.description or "",
+        parameters=info.input_schema or {"type": "object", "properties": {}},
+        handler=call,
     )
-    return agent, client
+
+
+def _extract_mcp_tool_result(payload: object) -> object:
+    if not isinstance(payload, dict):
+        return payload
+    result = payload.get("result", payload)
+    if not isinstance(result, dict):
+        return result
+    structured = result.get("structuredContent")
+    if structured is not None:
+        return structured
+    content = result.get("content")
+    if isinstance(content, list):
+        texts = [
+            item.get("text")
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text" and item.get("text")
+        ]
+        if len(texts) == 1:
+            try:
+                return json.loads(str(texts[0]))
+            except json.JSONDecodeError:
+                return {"text": texts[0]}
+        if texts:
+            return {"text": "\n".join(str(text) for text in texts)}
+    return result
+
+
+def _completed(
+    thread_id: str,
+    messages: list[dict[str, Any]],
+    tool_events: list[dict[str, Any]],
+    output: str,
+) -> dict[str, Any]:
+    return {
+        "threadId": thread_id,
+        "status": "completed",
+        "messages": messages,
+        "pendingActions": [],
+        "toolEvents": tool_events,
+        "output": output,
+        "pendingState": None,
+    }
+
+
+def _pending_action(call: dict[str, Any], tool: ToolSpec) -> dict[str, Any]:
+    return {
+        "name": tool.name,
+        "arguments": _tool_arguments(call),
+        "description": tool.description,
+        "allowedDecisions": ["approve", "reject"],
+    }
+
+
+def _tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": f"call-{uuid4().hex}",
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": json.dumps(arguments, ensure_ascii=False),
+        },
+    }
+
+
+def _tool_message(call: dict[str, Any], name: str, content: str) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": str(call.get("id") or uuid4()),
+        "name": name,
+        "content": content,
+    }
+
+
+def _tool_event(message: dict[str, Any], *, status: str) -> dict[str, Any]:
+    return {
+        "type": "tool",
+        "name": message.get("name", ""),
+        "content": _content_text(message.get("content")),
+        "status": status,
+    }
+
+
+def _tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
+    calls = message.get("tool_calls")
+    return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
+
+
+def _tool_name(call: dict[str, Any]) -> str:
+    function = call.get("function")
+    if isinstance(function, dict):
+        return str(function.get("name") or "")
+    return str(call.get("name") or "")
+
+
+def _tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
+    function = call.get("function")
+    raw = function.get("arguments") if isinstance(function, dict) else call.get("arguments")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+    return {}
+
+
+def _is_write_call(call: dict[str, Any], available: dict[str, ToolSpec]) -> bool:
+    name = _tool_name(call)
+    return name in available and name not in READ_ONLY_TOOLS
+
+
+def _last_user_text(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return _content_text(message.get("content"))
+    return ""
+
+
+def _content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, ensure_ascii=False)
+
+
+def _append_sources(content: str, messages: list[dict[str, Any]]) -> str:
+    if "Sources:" in content:
+        return content
+    uris = list(
+        dict.fromkeys(
+            uri
+            for message in messages
+            if message.get("role") == "tool"
+            for uri in URI_PATTERN.findall(_content_text(message.get("content")))
+        )
+    )
+    return content.rstrip() + ("\n\nSources: " + ", ".join(uris[:5]) if uris else "")
+
+
+def _resume_fallback(tool_events: list[dict[str, Any]]) -> str:
+    approved = [event["name"] for event in tool_events if event.get("status") == "executed"]
+    rejected = [event["name"] for event in tool_events if event.get("status") == "interrupted"]
+    parts = []
+    if approved:
+        parts.append("已执行：" + "、".join(approved))
+    if rejected:
+        parts.append("已拒绝：" + "、".join(rejected))
+    return "；".join(parts) or "审批已处理。"

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 from typing import Any, Literal
-
-from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_deepseek import ChatDeepSeek
-from langgraph.graph import END, START, MessagesState, StateGraph
+from uuid import uuid4
 
 from timecampus_agent.backend import TimeCampusBackendClient
 from timecampus_agent.config import Settings, load_settings
-from timecampus_agent.tools import build_guide_tools, build_operations_tools
+from timecampus_agent.llm import ChatClient
+from timecampus_agent.tools import ToolSpec, build_guide_tools, build_operations_tools
 
 AgentName = Literal["auto", "operations", "guide"]
 
@@ -48,81 +47,131 @@ GUIDE_MARKERS = (
     "参观",
 )
 POINT_PATTERN = re.compile(r"[^,;，；]+[,，]\s*-?\d+(?:\.\d+)?[,，]\s*-?\d+(?:\.\d+)?")
+MAX_AGENT_STEPS = 8
 
 
-class TimeCampusAgentState(MessagesState, total=False):
-    active_agent: str
-    route_reason: str
+class PythonAgentExecutor:
+    def __init__(
+        self,
+        model: ChatClient,
+        tools: list[ToolSpec],
+        system_prompt: str,
+        *,
+        name: str,
+    ) -> None:
+        self.model = model
+        self.tools = {tool.name: tool for tool in tools}
+        self.system_prompt = system_prompt
+        self.name = name
+
+    def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return asyncio.run(self.ainvoke(payload))
+
+    async def ainvoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+        messages = _normalize_messages(payload.get("messages", []))
+        new_messages = await self.run_messages(messages)
+        return {"messages": [*messages, *new_messages], "active_agent": self.name}
+
+    async def run_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        thread_messages: list[dict[str, Any]] = []
+        for _ in range(MAX_AGENT_STEPS):
+            response = await self.model.complete(
+                [{"role": "system", "content": self.system_prompt}, *messages, *thread_messages],
+                [tool.openai_schema() for tool in self.tools.values()],
+            )
+            thread_messages.append(response)
+            calls = _tool_calls(response)
+            if not calls:
+                return thread_messages
+            for call in calls:
+                thread_messages.append(await self._tool_message(call))
+        thread_messages.append(
+            {
+                "role": "assistant",
+                "content": "工具调用轮次过多，请缩小任务范围后重试。",
+            }
+        )
+        return thread_messages
+
+    async def _tool_message(self, call: dict[str, Any]) -> dict[str, Any]:
+        name = _tool_name(call)
+        arguments = _tool_arguments(call)
+        tool = self.tools.get(name)
+        if tool is None:
+            content = json.dumps({"error": f"Unknown tool: {name}"}, ensure_ascii=False)
+        else:
+            try:
+                content = _content_text(await tool.ainvoke(arguments))
+            except Exception as exception:
+                content = json.dumps({"error": str(exception)}, ensure_ascii=False)
+        return {
+            "role": "tool",
+            "tool_call_id": str(call.get("id") or uuid4()),
+            "name": name,
+            "content": content,
+        }
+
+
+class TimeCampusAgentExecutor:
+    def __init__(
+        self,
+        operations_agent: PythonAgentExecutor,
+        guide_agent: PythonAgentExecutor,
+        default_agent: AgentName = "auto",
+    ) -> None:
+        self.operations_agent = operations_agent
+        self.guide_agent = guide_agent
+        self.default_agent = default_agent
+
+    def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return asyncio.run(self.ainvoke(payload))
+
+    async def ainvoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+        messages = _normalize_messages(payload.get("messages", []))
+        active_agent, reason = route_agent(_last_message_text(messages), self.default_agent)
+        agent = self.guide_agent if active_agent == "guide" else self.operations_agent
+        result = await agent.ainvoke({"messages": messages})
+        result["active_agent"] = active_agent
+        result["route_reason"] = reason
+        return result
 
 
 def create_agent_executor(
     settings: Settings | None = None,
     default_agent: AgentName = "auto",
-) -> Any:
+) -> TimeCampusAgentExecutor:
     settings = settings or load_settings()
     if not settings.chat_api_key:
-        raise RuntimeError("TIMECAMPUS_CHAT_API_KEY is required to run the LangGraph agent.")
+        raise RuntimeError("TIMECAMPUS_CHAT_API_KEY is required to run the Python agent.")
 
     client = TimeCampusBackendClient(settings.api_base_url, admin_token=settings.admin_token)
     if not client.admin_token and settings.admin_username and settings.admin_password:
         client.login(settings.admin_username, settings.admin_password)
 
-    llm = ChatDeepSeek(
-        api_key=settings.chat_api_key,
-        base_url=settings.chat_base_url,
-        model=settings.chat_model,
-        temperature=settings.chat_temperature,
-    )
-    return create_timecampus_graph(llm, client, default_agent=default_agent)
+    model = ChatClient(settings)
+    return create_timecampus_agent(model, client, default_agent=default_agent)
 
 
-def create_timecampus_graph(
-    llm: Any,
+def create_timecampus_agent(
+    model: ChatClient,
     client: TimeCampusBackendClient,
     default_agent: AgentName = "auto",
-) -> Any:
-    operations_agent = create_agent(
-        model=llm,
-        tools=build_operations_tools(client),
-        system_prompt=OPERATIONS_PROMPT,
-        name="operations_agent",
+) -> TimeCampusAgentExecutor:
+    return TimeCampusAgentExecutor(
+        PythonAgentExecutor(
+            model,
+            build_operations_tools(client),
+            OPERATIONS_PROMPT,
+            name="operations",
+        ),
+        PythonAgentExecutor(
+            model,
+            build_guide_tools(client),
+            GUIDE_PROMPT,
+            name="guide",
+        ),
+        default_agent=default_agent,
     )
-    guide_agent = create_agent(
-        model=llm,
-        tools=build_guide_tools(client),
-        system_prompt=GUIDE_PROMPT,
-        name="guide_agent",
-    )
-
-    def supervisor(state: TimeCampusAgentState) -> dict[str, str]:
-        prompt = _last_message_text(state.get("messages", []))
-        active_agent, reason = route_agent(prompt, default_agent=default_agent)
-        return {"active_agent": active_agent, "route_reason": reason}
-
-    def operations_node(state: TimeCampusAgentState) -> dict[str, list[BaseMessage] | str]:
-        result = operations_agent.invoke({"messages": state.get("messages", [])})
-        return {"messages": [_last_graph_message(result)], "active_agent": "operations"}
-
-    def guide_node(state: TimeCampusAgentState) -> dict[str, list[BaseMessage] | str]:
-        result = guide_agent.invoke({"messages": state.get("messages", [])})
-        return {"messages": [_last_graph_message(result)], "active_agent": "guide"}
-
-    builder = StateGraph(TimeCampusAgentState)
-    builder.add_node("supervisor", supervisor)
-    builder.add_node("operations_agent", operations_node)
-    builder.add_node("guide_agent", guide_node)
-    builder.add_edge(START, "supervisor")
-    builder.add_conditional_edges(
-        "supervisor",
-        lambda state: state.get("active_agent", "operations"),
-        {
-            "operations": "operations_agent",
-            "guide": "guide_agent",
-        },
-    )
-    builder.add_edge("operations_agent", END)
-    builder.add_edge("guide_agent", END)
-    return builder.compile()
 
 
 def route_agent(prompt: str, default_agent: AgentName = "auto") -> tuple[str, str]:
@@ -136,34 +185,60 @@ def route_agent(prompt: str, default_agent: AgentName = "auto") -> tuple[str, st
     return "operations", "default operations intent"
 
 
-def _last_graph_message(result: object) -> BaseMessage:
-    if isinstance(result, dict):
-        messages = result.get("messages")
-        if isinstance(messages, list) and messages:
-            message = messages[-1]
-            if isinstance(message, BaseMessage):
-                return message
-            if isinstance(message, dict):
-                return AIMessage(content=str(message.get("content", "")))
-    return AIMessage(content=str(result))
-
-
-def _last_message_text(messages: list[BaseMessage] | list[dict[str, Any]]) -> str:
-    for message in reversed(messages):
+def _normalize_messages(messages: object) -> list[dict[str, Any]]:
+    if not isinstance(messages, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
         if isinstance(message, dict):
-            content = message.get("content")
-        else:
-            content = getattr(message, "content", None)
+            role = str(message.get("role") or "user")
+            content = _content_text(message.get("content", ""))
+            item = {"role": role, "content": content}
+            if message.get("tool_calls"):
+                item["tool_calls"] = message["tool_calls"]
+            if message.get("tool_call_id"):
+                item["tool_call_id"] = str(message["tool_call_id"])
+            if message.get("name"):
+                item["name"] = str(message["name"])
+            normalized.append(item)
+    return normalized
+
+
+def _last_message_text(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        content = message.get("content")
         if content:
-            return _content_to_text(content)
+            return _content_text(content)
     return ""
 
 
-def _content_to_text(content: object) -> str:
+def _tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
+    calls = message.get("tool_calls")
+    return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
+
+
+def _tool_name(call: dict[str, Any]) -> str:
+    function = call.get("function")
+    if isinstance(function, dict):
+        return str(function.get("name") or "")
+    return str(call.get("name") or "")
+
+
+def _tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
+    function = call.get("function")
+    raw = function.get("arguments") if isinstance(function, dict) else call.get("arguments")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+    return {}
+
+
+def _content_text(content: object) -> str:
     if isinstance(content, str):
         return content
-    if isinstance(content, list):
-        return " ".join(_content_to_text(item) for item in content)
-    if isinstance(content, dict):
-        return str(content.get("text") or content.get("content") or content)
-    return str(content)
+    return json.dumps(content, ensure_ascii=False)

@@ -1,6 +1,6 @@
 # TimeCampus Agent
 
-TimeCampus Agent 是“时光航迹”的独立 Python/LangGraph 子模块，用于后台运营维护、RAG 检索、草案生成、MCP 工具发现和游客导引。Agent 编排刻意放在 Portal 之外，前端保持纯 UI 客户端，Agent 通过 Backend REST API 和 `/mcp` 与系统交互。
+TimeCampus Agent 是“时光航迹”的独立纯 Python 子模块，用于后台运营维护、RAG 检索、草案生成、MCP 工具发现和游客导引。Agent 编排刻意放在 Portal 之外，前端保持纯 UI 客户端，Agent 通过 Backend REST API 和 `/mcp` 与系统交互。
 
 当前模块版本：`0.3.0-beta`。
 
@@ -67,7 +67,7 @@ uv run timecampus-agent route "主楼,39.981,116.34;图书馆,39.982,116.341"
 | --- | --- |
 | `rag-search <query> [--limit N]` | 优先调用 MCP `timecampus_rag_search`，未配置 MCP token 时回退管理端 REST RAG |
 | `draft <task> [--limit N]` | 调用 Backend `/admin/agent/draft` 生成 grounded 草案 |
-| `ask [--agent auto\|operations\|guide] <prompt>` | 运行 LangGraph supervisor，自动或指定运营/导览智能体 |
+| `ask [--agent auto\|operations\|guide] <prompt>` | 运行 Python supervisor，自动或指定运营/导览智能体 |
 | `route <name,lat,lng;...>` | 调用公开 `/map/walking-route` 生成游客步行路线摘要 |
 | `mcp-tools` | 连接 Backend MCP Server 并列出工具 |
 | `eval list` | 列出内置后台维护和游客导览评测用例 |
@@ -126,15 +126,15 @@ overall 并参与质量门禁，缺失或解析失败会记录为失败。
 | --- | --- |
 | `timecampus_agent.config` | 从 `.env` 加载 Backend、管理员、Chat Model、MCP 配置 |
 | `timecampus_agent.backend` | Backend REST API typed client |
-| `timecampus_agent.tools` | 运营/导览 LangChain tool wrappers |
+| `timecampus_agent.tools` | 运营/导览 Python tool wrappers |
 | `timecampus_agent.mcp_client` | Backend MCP 工具加载 |
-| `timecampus_agent.agent` | LangGraph supervisor 和运营/导览工具调用子图 |
+| `timecampus_agent.agent` | Python supervisor 和运营/导览工具调用循环 |
 | `timecampus_agent.evaluation` | Agent Eval Harness、用例、评分器、报告和 CLI |
-| `timecampus_agent.service` | FastAPI 内部接口、MCP Adapter、HITL 审批和 Eval HTTP API |
+| `timecampus_agent.service` | FastAPI 内部接口、MCP 执行器、HITL 审批和 Eval HTTP API |
 | `timecampus_agent.memory` | JSONL 会话持久化、原子写入和 `MEMORY.md` 长期运营约束 |
 | `timecampus_agent.cli` | 本地操作员 CLI |
 
-`rag-search` 在生产配置 MCP token 后优先走 MCP RAG；`draft` 和 LangChain tools 仍保留 REST client，便于管理端草案、冒烟和测试。
+`rag-search` 在生产配置 MCP token 后优先走 MCP RAG；`draft` 和 Python tools 仍保留 REST client，便于管理端草案、冒烟和测试。
 
 ## 会话与记忆
 
@@ -142,7 +142,7 @@ overall 并参与质量门禁，缺失或解析失败会记录为失败。
 - `TIMECAMPUS_AGENT_MEMORY_DIR/MEMORY.md` 是可人工维护的长期运营约束，启动时注入运营执行器提示词，最大读取 8000 字符。
 - 每次调用只回放最近 `TIMECAMPUS_AGENT_SESSION_HISTORY_LIMIT` 条消息，默认 40。
 - JSONL 使用临时文件、`fsync` 和原子替换写入；会话 ID 只接受 UUID。
-- LangGraph HITL checkpoint 仍使用 `InMemorySaver`，因此服务重启后历史会话可续聊，但未审批线程失效。
+- HITL 待审批摘要写入 `pending-runs.json`，可恢复执行状态写入 `pending-thread-states.json`，服务重启后仍可继续审批。
 - Portal 通过 Backend SSE 代理接收 `status`、`preflight`、`delta`、`result`、`done` 事件。
 
 ## 安全边界
@@ -152,7 +152,7 @@ Agent 运行应遵守 Backend MCP Server 的相同规则：
 - 维护建议前先检索 grounded context。
 - 写入前读取当前记录。
 - 文案编辑优先使用 copy-only 能力。
-- Portal 运营页的写操作使用 LangGraph HITL 暂停，管理员只能批准或拒绝原始参数。
+- Portal 运营页的写操作使用 Python HITL 暂停，管理员只能批准或拒绝原始参数。
 - `timecampus_delete_poi`、`timecampus_delete_media` 不会加载进运营执行器。
 - 版权不明、年份/地点/来源不明确的任务必须停止或人工复核。
 - 生产 MCP 必须使用 `TIMECAMPUS_MCP_TOKEN`。
@@ -177,7 +177,7 @@ node tools\agent-smoke.mjs --dry-run
 
 - 项目功能规格：[../docs/functional-spec.md](../docs/functional-spec.md)
 - 项目技术规格：[../docs/technical-spec.md](../docs/technical-spec.md)
-- LangGraph Agent 状态图：[docs/langgraph-agent.md](docs/langgraph-agent.md)
+- Python Agent 架构：[docs/python-agent.md](docs/python-agent.md)
 - Agent Stack 联调：[../docs/agent-stack.md](../docs/agent-stack.md)
 - Agent Evaluation：[../docs/agent-evaluation.md](../docs/agent-evaluation.md)
 - Backend MCP Server：[../TimeCampus-Backend/docs/mcp-server.md](../TimeCampus-Backend/docs/mcp-server.md)

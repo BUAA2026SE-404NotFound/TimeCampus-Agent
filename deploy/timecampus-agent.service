@@ -1,5 +1,5 @@
 [Unit]
-Description=TimeCampus LangGraph Agent
+Description=TimeCampus Python Agent
 After=network-online.target timecampus-backend.service
 Wants=network-online.target
 

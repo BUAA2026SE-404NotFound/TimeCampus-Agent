@@ -17,6 +17,7 @@ class McpClientError(RuntimeError):
 class McpToolInfo:
     name: str
     description: str | None = None
+    input_schema: dict[str, Any] | None = None
 
 
 class McpStreamableHttpClient:
@@ -55,6 +56,9 @@ class McpStreamableHttpClient:
             McpToolInfo(
                 name=str(tool.get("name", "")),
                 description=tool.get("description"),
+                input_schema=tool.get("inputSchema")
+                if isinstance(tool.get("inputSchema"), dict)
+                else None,
             )
             for tool in tools
             if isinstance(tool, dict) and tool.get("name")

@@ -3,21 +3,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from langchain_deepseek import ChatDeepSeek
-
 from timecampus_agent.config import Settings
 from timecampus_agent.evaluation.models import AgentTrace, EvalCase
+from timecampus_agent.llm import ChatClient
 
 
 def score_with_llm_judge(settings: Settings, case: EvalCase, trace: AgentTrace) -> dict[str, float]:
     if not settings.eval_llm_enabled or not settings.chat_api_key:
         return {}
-    llm = ChatDeepSeek(
-        api_key=settings.chat_api_key,
-        base_url=settings.chat_base_url,
-        model=settings.chat_model,
-        temperature=0,
-    )
+    llm = ChatClient(settings, temperature=0)
     prompt = {
         "case": case.model_dump(by_alias=True),
         "trace": {
@@ -28,21 +22,23 @@ def score_with_llm_judge(settings: Settings, case: EvalCase, trace: AgentTrace) 
             "error": trace.error,
         },
     }
-    response = llm.invoke(
+    response = llm.complete_sync(
         [
-            (
-                "system",
-                "You are an evaluator for TimeCampus agent traces. "
-                "Return strict JSON with numeric 0-100 scores for answerCorrectness "
-                "and faithfulness. Correctness measures whether the answer satisfies "
-                "the case expectation. Faithfulness measures whether every factual "
-                "claim is supported by retrievedDocs or successful read-only tool "
-                "results in toolCalls. Do not include explanations.",
-            ),
-            ("user", json.dumps(prompt, ensure_ascii=False)),
+            {
+                "role": "system",
+                "content": (
+                    "You are an evaluator for TimeCampus agent traces. "
+                    "Return strict JSON with numeric 0-100 scores for answerCorrectness "
+                    "and faithfulness. Correctness measures whether the answer satisfies "
+                    "the case expectation. Faithfulness measures whether every factual "
+                    "claim is supported by retrievedDocs or successful read-only tool "
+                    "results in toolCalls. Do not include explanations."
+                ),
+            },
+            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
         ]
     )
-    content = getattr(response, "content", "")
+    content = response.get("content", "")
     value = _parse_json_object(str(content))
     return {
         f"llm{name[0].upper()}{name[1:]}": _clamp_score(raw)

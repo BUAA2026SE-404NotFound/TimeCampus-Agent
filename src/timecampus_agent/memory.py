@@ -21,6 +21,7 @@ class SessionStore:
         self.sessions_dir = root / "sessions"
         self.memory_file = root / "MEMORY.md"
         self.pending_file = root / "pending-runs.json"
+        self.pending_state_file = root / "pending-thread-states.json"
         self.history_limit = max(2, history_limit)
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -145,6 +146,32 @@ class SessionStore:
                 )
                 os.replace(temporary, self.pending_file)
                 self.pending_file.chmod(0o600)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    def load_pending_thread_states(self) -> dict[str, dict[str, Any]]:
+        try:
+            value = json.loads(self.pending_state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {
+            thread_id: state
+            for thread_id, state in value.items()
+            if isinstance(thread_id, str) and isinstance(state, dict)
+        }
+
+    def save_pending_thread_states(self, states: dict[str, dict[str, Any]]) -> None:
+        temporary = self.pending_state_file.with_suffix(".json.tmp")
+        with self._lock:
+            try:
+                temporary.write_text(
+                    json.dumps(states, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                os.replace(temporary, self.pending_state_file)
+                self.pending_state_file.chmod(0o600)
             finally:
                 temporary.unlink(missing_ok=True)
 

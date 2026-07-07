@@ -11,11 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from langchain.agents import create_agent
-from langchain.agents.middleware import wrap_tool_call
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from langchain_deepseek import ChatDeepSeek
-
+from timecampus_agent.agent import PythonAgentExecutor
 from timecampus_agent.backend import TimeCampusBackendClient
 from timecampus_agent.config import Settings
 from timecampus_agent.evaluation.cases import (
@@ -34,6 +30,7 @@ from timecampus_agent.evaluation.models import (
     ToolCall,
 )
 from timecampus_agent.evaluation.scorers import finalize_result, score_case
+from timecampus_agent.llm import ChatClient
 from timecampus_agent.operations_runtime import build_operations_mcp_agent
 from timecampus_agent.tools import build_guide_tools
 
@@ -41,27 +38,15 @@ ProgressCallback = Callable[[int, int, EvalResult], None]
 PROMPT_VERSION = "operations-v2-guide-v2"
 
 
-@wrap_tool_call
-async def _inject_live_eval_failures(request: Any, handler: Any) -> Any:
-    tool_call = request.tool_call
-    arguments = tool_call.get("args", {})
-    if (
-        tool_call.get("name") == "timecampus_rag_search"
-        and "量子纪念馆" in json.dumps(arguments, ensure_ascii=False)
-    ):
-        return ToolMessage(
-            content=json.dumps(
-                {
-                    "query": "量子纪念馆 1958",
-                    "usage": "fault-injected empty retrieval",
-                    "corpusSize": 0,
-                    "hits": [],
-                },
-                ensure_ascii=False,
-            ),
-            tool_call_id=tool_call["id"],
-        )
-    return await handler(request)
+async def _inject_live_eval_failures(name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    if name == "timecampus_rag_search" and "量子纪念馆" in json.dumps(arguments, ensure_ascii=False):
+        return {
+            "query": "量子纪念馆 1958",
+            "usage": "fault-injected empty retrieval",
+            "corpusSize": 0,
+            "hits": [],
+        }
+    return None
 
 
 class EvalRunner:
@@ -125,15 +110,15 @@ class EvalRunner:
         operations_agent = None
         retrieval_tool = None
         if any(case.suite == "maintenance" for case in cases):
-            operations_agent, client = await build_operations_mcp_agent(
+            operations_agent, _client = await build_operations_mcp_agent(
                 self.settings,
-                extra_middleware=[_inject_live_eval_failures],
+                tool_overrides=[_inject_live_eval_failures],
             )
             if any(case.target == "retrieval" for case in cases):
                 retrieval_tool = next(
                     (
                         tool
-                        for tool in await client.get_tools()
+                        for tool in operations_agent.tools.values()
                         if tool.name == "timecampus_rag_search"
                     ),
                     None,
@@ -142,14 +127,8 @@ class EvalRunner:
                     raise RuntimeError("Backend MCP did not expose timecampus_rag_search.")
         guide_agent = None
         if any(case.suite == "guide" for case in cases):
-            model = ChatDeepSeek(
-                api_key=self.settings.chat_api_key,
-                base_url=self.settings.chat_base_url,
-                model=self.settings.chat_model,
-                temperature=self.settings.chat_temperature,
-            )
-            guide_agent = create_agent(
-                model=model,
+            guide_agent = PythonAgentExecutor(
+                ChatClient(self.settings),
                 tools=build_guide_tools(TimeCampusBackendClient(self.settings.api_base_url)),
                 system_prompt=(
                     "You are the TimeCampus visitor guide agent. Resolve published POIs with "
@@ -189,15 +168,21 @@ class EvalRunner:
             return await _run_retrieval_case(case, retrieval_tool)
         agent = operations_agent if case.suite == "maintenance" else guide_agent
         started = time.perf_counter()
-        messages: list[BaseMessage] = []
+        messages: list[dict[str, Any]] = []
         try:
             for prompt in _case_prompts(case):
-                result = await agent.ainvoke(
-                    {"messages": [*messages, HumanMessage(content=prompt)]},
-                    config={"configurable": {"thread_id": str(uuid4())}},
-                )
-                messages = list(result.get("messages", messages))
-                if result.get("__interrupt__"):
+                if case.suite == "maintenance":
+                    result = await agent.run(
+                        [*messages, {"role": "user", "content": prompt}],
+                        thread_id=str(uuid4()),
+                    )
+                    messages = [*messages, {"role": "user", "content": prompt}, *result["messages"]]
+                else:
+                    result = await agent.ainvoke(
+                        {"messages": [*messages, {"role": "user", "content": prompt}]}
+                    )
+                    messages = list(result.get("messages", messages))
+                if result.get("status") == "approval_required":
                     break
             return _trace_from_messages(messages, _elapsed_ms(started))
         except Exception as exception:  # live network/model boundary
@@ -290,32 +275,31 @@ def _case_prompts(case: EvalCase) -> list[str]:
     return [str(case.input.get("query") or case.input.get("task") or "")]
 
 
-def _trace_from_messages(messages: list[BaseMessage], latency_ms: int) -> AgentTrace:
+def _trace_from_messages(messages: list[dict[str, Any]], latency_ms: int) -> AgentTrace:
     calls: dict[str, ToolCall] = {}
     order: list[str] = []
     output = ""
     docs: list[RetrievedDoc] = []
     route_plan = None
     for message in messages:
-        if isinstance(message, AIMessage):
-            text = _content_text(message.content)
+        role = message.get("role")
+        if role == "assistant":
+            text = _content_text(message.get("content"))
             if text:
                 output = text
-            for raw_call in message.tool_calls:
+            for raw_call in message.get("tool_calls", []) or []:
                 call_id = str(raw_call.get("id") or uuid4())
                 calls[call_id] = ToolCall(
-                    name=str(raw_call.get("name", "")),
-                    arguments=raw_call.get("args", {})
-                    if isinstance(raw_call.get("args"), dict)
-                    else {},
+                    name=_tool_name(raw_call),
+                    arguments=_tool_arguments(raw_call),
                     status="requested",
                 )
                 order.append(call_id)
-        elif isinstance(message, ToolMessage):
-            call_id = str(message.tool_call_id or uuid4())
-            payload = _json_object(_content_text(message.content))
+        elif role == "tool":
+            call_id = str(message.get("tool_call_id") or uuid4())
+            payload = _json_object(_content_text(message.get("content")))
             call = calls.get(call_id) or ToolCall(
-                name=message.name or "",
+                name=str(message.get("name") or ""),
                 arguments={},
                 status="requested",
             )
@@ -389,6 +373,27 @@ def _json_object(value: str) -> dict[str, Any]:
         return parsed
     if isinstance(parsed, list):
         return {"items": parsed}
+    return {}
+
+
+def _tool_name(call: dict[str, Any]) -> str:
+    function = call.get("function")
+    if isinstance(function, dict):
+        return str(function.get("name") or "")
+    return str(call.get("name") or "")
+
+
+def _tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
+    function = call.get("function")
+    raw = function.get("arguments") if isinstance(function, dict) else call.get("arguments")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
     return {}
 
 
@@ -510,8 +515,7 @@ async def _run_retrieval_case(case: EvalCase, tool: Any) -> AgentTrace:
     }
     try:
         raw_result = await tool.ainvoke(arguments)
-        content = raw_result.content if isinstance(raw_result, BaseMessage) else raw_result
-        payload = content if isinstance(content, dict) else _json_object(_content_text(content))
+        payload = raw_result if isinstance(raw_result, dict) else _json_object(_content_text(raw_result))
         docs = _docs_from_payload(payload)
         return AgentTrace(
             output=f"Retrieved {len(docs)} grounded documents.",

@@ -1,7 +1,10 @@
-from langchain_deepseek import ChatDeepSeek
-
-from timecampus_agent.agent import create_timecampus_graph, route_agent
+from timecampus_agent.agent import create_timecampus_agent, route_agent
 from timecampus_agent.backend import TimeCampusBackendClient
+
+
+class FakeModel:
+    async def complete(self, messages, tools=None):
+        return {"role": "assistant", "content": "ok"}
 
 
 def test_route_agent_detects_guide_intent() -> None:
@@ -18,8 +21,11 @@ def test_route_agent_defaults_to_operations() -> None:
     assert "operations" in reason
 
 
-def test_timecampus_graph_compiles_supervisor_nodes() -> None:
-    llm = ChatDeepSeek(api_key="test", base_url="http://chat.example.test/v1", model="test")
-    graph = create_timecampus_graph(llm, TimeCampusBackendClient("http://api.example.test/api/v1"))
+def test_timecampus_agent_builds_two_python_executors() -> None:
+    agent = create_timecampus_agent(
+        FakeModel(),
+        TimeCampusBackendClient("http://api.example.test/api/v1"),
+    )
 
-    assert {"supervisor", "operations_agent", "guide_agent"} <= set(graph.get_graph().nodes)
+    assert agent.operations_agent.name == "operations"
+    assert agent.guide_agent.name == "guide"
