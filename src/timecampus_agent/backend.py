@@ -52,7 +52,7 @@ class TimeCampusBackendClient:
             {
                 "query": query,
                 "limit": limit,
-                "types": list(types or ["poi", "media", "comment", "guideline"]),
+                "types": list(types or ["poi", "media", "comment", "guideline", "knowledge"]),
                 "poiId": poi_id,
                 "includePending": include_pending,
             },
@@ -71,7 +71,7 @@ class TimeCampusBackendClient:
             {
                 "task": task,
                 "limit": limit,
-                "types": list(types or ["poi", "media", "guideline"]),
+                "types": list(types or ["poi", "media", "guideline", "knowledge"]),
                 "poiId": poi_id,
                 "includePending": include_pending,
             },

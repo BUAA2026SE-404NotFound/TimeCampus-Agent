@@ -8,7 +8,7 @@ from typing import Any
 from timecampus_agent.evaluation.models import AgentTrace, EvalCase
 
 ALL_SUITES = {"maintenance", "guide"}
-DATASET_VERSION = "2026-07-03.2"
+DATASET_VERSION = "2026-07-07.1"
 DATASET_PATH = Path(__file__).with_name("cases.jsonl")
 
 

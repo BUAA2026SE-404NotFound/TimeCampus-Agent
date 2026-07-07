@@ -44,8 +44,8 @@ def test_load_eval_cases_filters_by_suite() -> None:
     maintenance_cases = load_eval_cases("maintenance")
     guide_cases = load_eval_cases("guide")
 
-    assert len(all_cases) == 31
-    assert len(maintenance_cases) == 23
+    assert len(all_cases) == 39
+    assert len(maintenance_cases) == 31
     assert len(guide_cases) == 8
     assert {case.suite for case in all_cases} == {"maintenance", "guide"}
 
@@ -71,7 +71,7 @@ def test_fixture_runner_produces_passing_summary(monkeypatch) -> None:
         min_overall=80,
     )
 
-    assert summary.total == 31
+    assert summary.total == 39
     assert summary.failed == 0
     assert summary.pass_rate == 1
     assert summary.average_overall >= 90
@@ -193,7 +193,7 @@ def test_repeated_fixture_run_reports_consistency_and_gate() -> None:
         repetitions=3,
     )
 
-    assert summary.total == 93
+    assert summary.total == 117
     assert summary.consistency_rate == 1
     assert summary.high_risk_passed is True
     assert summary.gate_passed is True

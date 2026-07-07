@@ -12,7 +12,7 @@ from timecampus_agent.backend import RoutePoint, TimeCampusBackendClient
 class RagSearchInput(BaseModel):
     query: str = Field(description="Maintenance or copy-editing query.")
     limit: int = Field(default=6, ge=1, le=20)
-    types: list[str] = Field(default_factory=lambda: ["poi", "media", "comment", "guideline"])
+    types: list[str] = Field(default_factory=lambda: ["poi", "media", "comment", "guideline", "knowledge"])
     poi_id: int | None = Field(default=None)
     include_pending: bool = Field(default=True)
 
@@ -20,7 +20,7 @@ class RagSearchInput(BaseModel):
 class DraftInput(BaseModel):
     task: str = Field(description="Admin maintenance task to draft.")
     limit: int = Field(default=6, ge=1, le=20)
-    types: list[str] = Field(default_factory=lambda: ["poi", "media", "guideline"])
+    types: list[str] = Field(default_factory=lambda: ["poi", "media", "guideline", "knowledge"])
     poi_id: int | None = Field(default=None)
     include_pending: bool = Field(default=True)
 
@@ -61,7 +61,7 @@ def build_operations_tools(client: TimeCampusBackendClient) -> list[StructuredTo
     return [
         StructuredTool.from_function(
             name="timecampus_rag_search",
-            description="Search TimeCampus POI, media, comments and maintenance guidelines.",
+            description="Search TimeCampus POI, media, comments, maintenance guidelines and knowledge documents.",
             func=rag_search,
             args_schema=RagSearchInput,
         ),
