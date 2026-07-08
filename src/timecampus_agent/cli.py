@@ -10,10 +10,6 @@ from rich.console import Console
 from timecampus_agent.agent import create_agent_executor
 from timecampus_agent.backend import RoutePoint, TimeCampusBackendClient
 from timecampus_agent.config import load_settings
-from timecampus_agent.evaluation.embedding_benchmark import (
-    handle_embedding_benchmark_command,
-    register_embedding_benchmark_command,
-)
 from timecampus_agent.evaluation.cli import handle_eval_command, register_eval_commands
 from timecampus_agent.mcp_client import call_timecampus_mcp_tool, list_timecampus_mcp_tool_names
 
@@ -44,16 +40,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve_parser.add_argument("--host")
     serve_parser.add_argument("--port", type=int)
     register_eval_commands(subparsers)
-    register_embedding_benchmark_command(subparsers)
 
     args = parser.parse_args(argv)
     settings = load_settings()
 
     if args.command == "eval":
         return handle_eval_command(args, settings, console)
-
-    if args.command == "embedding-benchmark":
-        return handle_embedding_benchmark_command(args, console)
 
     if args.command == "serve":
         if not settings.agent_api_token:
