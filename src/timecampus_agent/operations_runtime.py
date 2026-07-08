@@ -393,7 +393,7 @@ async def build_operations_mcp_agent(
 ) -> tuple[PurePythonOperationsAgent, McpStreamableHttpClient]:
     if not settings.chat_api_key:
         raise RuntimeError("TIMECAMPUS_CHAT_API_KEY is not configured.")
-    client = McpStreamableHttpClient(settings.mcp_url, token=settings.mcp_token)
+    client = McpStreamableHttpClient(settings.mcp_url)
     tools = [
         _mcp_tool(client, info)
         for info in await client.list_tools()

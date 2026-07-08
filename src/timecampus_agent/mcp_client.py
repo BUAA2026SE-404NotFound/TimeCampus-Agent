@@ -85,8 +85,6 @@ class McpStreamableHttpClient:
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
         }
-        if self.token:
-            headers["X-TimeCampus-MCP-Token"] = self.token
         if include_session and self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
 
@@ -107,7 +105,7 @@ class McpStreamableHttpClient:
 
 def build_mcp_client(settings: Settings | None = None) -> McpStreamableHttpClient:
     settings = settings or load_settings()
-    return McpStreamableHttpClient(settings.mcp_url, token=settings.mcp_token)
+    return McpStreamableHttpClient(settings.mcp_url)
 
 
 async def list_timecampus_mcp_tool_names(settings: Settings | None = None) -> list[str]:

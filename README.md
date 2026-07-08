@@ -22,7 +22,6 @@ TIMECAMPUS_CHAT_BASE_URL=https://api.deepseek.com/v1
 TIMECAMPUS_CHAT_MODEL=deepseek-chat
 # TIMECAMPUS_CHAT_API_KEY=
 TIMECAMPUS_MCP_URL=http://127.0.0.1:8080/mcp
-# TIMECAMPUS_MCP_TOKEN=
 TIMECAMPUS_AGENT_API_TOKEN=<backend-and-agent-shared-token>
 TIMECAMPUS_AGENT_API_HOST=127.0.0.1
 TIMECAMPUS_AGENT_API_PORT=8090
@@ -31,7 +30,7 @@ TIMECAMPUS_AGENT_SESSION_HISTORY_LIMIT=40
 # TIMECAMPUS_EVAL_LLM_ENABLED=false
 ```
 
-`TIMECAMPUS_ADMIN_TOKEN` 优先于用户名密码；调用管理端草案接口时必须有管理员 token 或可登录凭据。`rag-search` 在配置 `TIMECAMPUS_MCP_TOKEN` 时优先走 MCP RAG 工具，避免生产 cap 登录流程影响 CLI。
+`TIMECAMPUS_ADMIN_TOKEN` 优先于用户名密码；调用管理端草案接口时必须有管理员 token 或可登录凭据。`rag-search` 默认走内网 MCP RAG 工具，失败时回退管理端 REST。
 
 ## 运行
 
@@ -65,7 +64,7 @@ uv run timecampus-agent route "主楼,39.981,116.34;图书馆,39.982,116.341"
 
 | 命令 | 用途 |
 | --- | --- |
-| `rag-search <query> [--limit N]` | 优先调用 MCP `timecampus_rag_search`，未配置 MCP token 时回退管理端 REST RAG |
+| `rag-search <query> [--limit N]` | 优先调用 MCP `timecampus_rag_search`，失败时回退管理端 REST RAG |
 | `draft <task> [--limit N]` | 调用 Backend `/admin/agent/draft` 生成 grounded 草案 |
 | `ask [--agent auto\|operations\|guide] <prompt>` | 运行 Python supervisor，自动或指定运营/导览智能体 |
 | `route <name,lat,lng;...>` | 调用公开 `/map/walking-route` 生成游客步行路线摘要 |
@@ -147,7 +146,7 @@ overall 并参与质量门禁，缺失或解析失败会记录为失败。
 | `timecampus_agent.memory` | JSONL 会话持久化、原子写入和 `MEMORY.md` 长期运营约束 |
 | `timecampus_agent.cli` | 本地操作员 CLI |
 
-`rag-search` 在生产配置 MCP token 后优先走 MCP RAG；`draft` 和 Python tools 仍保留 REST client，便于管理端草案、冒烟和测试。
+`rag-search` 默认优先走 MCP RAG；`draft` 和 Python tools 仍保留 REST client，便于管理端草案、冒烟和测试。
 
 ## 会话与记忆
 
@@ -168,7 +167,7 @@ Agent 运行应遵守 Backend MCP Server 的相同规则：
 - Portal 运营页的写操作使用 Python HITL 暂停，管理员只能批准或拒绝原始参数。
 - `timecampus_delete_poi`、`timecampus_delete_media` 不会加载进运营执行器。
 - 版权不明、年份/地点/来源不明确的任务必须停止或人工复核。
-- 生产 MCP 必须使用 `TIMECAMPUS_MCP_TOKEN`。
+- 生产 MCP 仅监听内网，不要求 token。
 - 内部 HTTP 服务必须使用 `TIMECAMPUS_AGENT_API_TOKEN`，浏览器不直接访问该服务。
 
 ## 测试

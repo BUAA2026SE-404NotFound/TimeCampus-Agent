@@ -5,7 +5,7 @@ from timecampus_agent.mcp_client import McpStreamableHttpClient, build_mcp_clien
 from timecampus_agent.mcp_client import _try_parse_streamable_payload
 
 
-def test_build_mcp_client_registers_timecampus_connection() -> None:
+def test_build_mcp_client_registers_timecampus_connection_without_token() -> None:
     settings = Settings(
         api_base_url="http://api.example.test",
         admin_username=None,
@@ -23,7 +23,7 @@ def test_build_mcp_client_registers_timecampus_connection() -> None:
     client = build_mcp_client(settings)
 
     assert client.url == "http://mcp.example.test/mcp"
-    assert client.token == "token"
+    assert client.token is None
 
 
 def test_parse_streamable_payload() -> None:

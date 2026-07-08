@@ -75,21 +75,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         console.print(_extract_agent_output(result))
         return 0
 
-    if args.command == "rag-search" and settings.mcp_token:
-        result = asyncio.run(
-            call_timecampus_mcp_tool(
-                "timecampus_rag_search",
-                {
-                    "query": args.query,
-                    "limit": args.limit,
-                    "types": ["poi", "media", "comment", "guideline", "knowledge"],
-                    "includePending": True,
-                },
-                settings,
+    if args.command == "rag-search":
+        try:
+            result = asyncio.run(
+                call_timecampus_mcp_tool(
+                    "timecampus_rag_search",
+                    {
+                        "query": args.query,
+                        "limit": args.limit,
+                        "types": ["poi", "media", "comment", "guideline", "knowledge"],
+                        "includePending": True,
+                    },
+                    settings,
+                )
             )
-        )
-        _print_json(_extract_mcp_tool_result(result))
-        return 0
+            _print_json(_extract_mcp_tool_result(result))
+            return 0
+        except Exception:
+            pass
 
     client = TimeCampusBackendClient(settings.api_base_url, admin_token=settings.admin_token)
     if args.command == "draft" and not client.admin_token:
