@@ -259,7 +259,7 @@ class PurePythonOperationsAgent:
             if not tools:
                 raise
             # ponytail: keep read-only answers alive if the provider rejects MCP tool schemas.
-            return await self.model.complete(messages, None)
+            return await self.model.complete(_plain_messages(messages), None)
 
 
 def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:
@@ -273,6 +273,25 @@ def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:
         for tool in allowed
     }
     return allowed, interrupt_on
+
+
+def _plain_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    plain: list[dict[str, str]] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        content = _content_text(message.get("content"))
+        calls = _tool_calls(message)
+        if calls:
+            names = ", ".join(_tool_name(call) for call in calls)
+            content = "\n".join(part for part in (content, f"Tool calls requested: {names}") if part)
+        if role == "tool":
+            name = str(message.get("name") or "tool")
+            content = f"Tool result from {name}:\n{content}"
+            role = "user"
+        if role not in {"system", "user", "assistant"}:
+            role = "user"
+        plain.append({"role": role, "content": content})
+    return plain
 
 
 async def build_operations_mcp_agent(

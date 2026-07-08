@@ -323,6 +323,9 @@ def test_operations_middleware_falls_back_when_tool_schema_call_fails() -> None:
             async def complete(self, messages, tools=None):
                 if tools:
                     raise RuntimeError("tool schema rejected")
+                assert all(message["role"] != "tool" for message in messages)
+                assert all("tool_calls" not in message for message in messages)
+                assert any("Tool result from timecampus_rag_search" in message["content"] for message in messages)
                 return {"role": "assistant", "content": "基于资料回答。"}
 
         async def rag(_arguments):
