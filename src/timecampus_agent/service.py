@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -26,6 +27,8 @@ from timecampus_agent.operations_runtime import (
     build_operations_mcp_agent,
     tool_policy as _tool_policy,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:
@@ -585,8 +588,15 @@ def _stream_response(events: AsyncIterator[tuple[str, Any]]) -> StreamingRespons
                 yield _sse(event, data)
         except HTTPException as exception:
             yield _sse("error", {"message": exception.detail, "status": exception.status_code})
-        except Exception:
-            yield _sse("error", {"message": "Agent stream failed.", "status": 500})
+        except Exception as exception:
+            LOGGER.exception("Agent stream failed")
+            yield _sse(
+                "error",
+                {
+                    "message": f"Agent stream failed: {exception.__class__.__name__}",
+                    "status": 500,
+                },
+            )
 
     return StreamingResponse(
         generate(),

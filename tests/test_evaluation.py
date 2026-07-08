@@ -317,6 +317,40 @@ def test_operations_middleware_retries_rag_and_appends_real_sources() -> None:
     assert result["output"].endswith("Sources: timecampus://media/9017")
 
 
+def test_operations_middleware_falls_back_when_tool_schema_call_fails() -> None:
+    async def exercise():
+        class Model:
+            async def complete(self, messages, tools=None):
+                if tools:
+                    raise RuntimeError("tool schema rejected")
+                return {"role": "assistant", "content": "基于资料回答。"}
+
+        async def rag(_arguments):
+            return '{"uri":"timecampus://knowledge/buaa-history"}'
+
+        agent = PurePythonOperationsAgent(
+            Model(),
+            [
+                ToolSpec(
+                    "timecampus_rag_search",
+                    "rag",
+                    {"type": "object", "properties": {}},
+                    rag,
+                )
+            ],
+            "base",
+        )
+        return await agent.run(
+            [{"role": "user", "content": "给我讲一讲北航的历史沿革"}],
+            thread_id="thread-1",
+        )
+
+    result = asyncio.run(exercise())
+
+    assert result["status"] == "completed"
+    assert result["output"].endswith("Sources: timecampus://knowledge/buaa-history")
+
+
 def test_operations_middleware_makes_bulk_first_turn_read_only() -> None:
     async def exercise():
         class Model:

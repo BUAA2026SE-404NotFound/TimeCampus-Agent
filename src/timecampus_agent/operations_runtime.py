@@ -87,7 +87,7 @@ class PurePythonOperationsAgent:
         await self._rag_first(user_text, turn_messages, tool_events)
 
         for _ in range(MAX_AGENT_STEPS):
-            response = await self.model.complete(
+            response = await self._complete(
                 [{"role": "system", "content": self._prompt(user_text)}, *messages, *turn_messages],
                 [tool.openai_schema() for tool in available.values()],
             )
@@ -247,6 +247,19 @@ class PurePythonOperationsAgent:
             if value is not None:
                 return value
         return await tool.ainvoke(arguments)
+
+    async def _complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        try:
+            return await self.model.complete(messages, tools)
+        except Exception:
+            if not tools:
+                raise
+            # ponytail: keep read-only answers alive if the provider rejects MCP tool schemas.
+            return await self.model.complete(messages, None)
 
 
 def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:
