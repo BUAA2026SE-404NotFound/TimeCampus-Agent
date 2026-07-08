@@ -110,6 +110,19 @@ answer correctness 与 faithfulness。
 - `eval-reports/runs/*.json`：最近 20 次运行，可用于版本对比。
 - `eval-reports/bad-cases.jsonl`：append-only Bad Case 生命周期。
 
+### Embedding 横向评测
+
+从生产 Qdrant 导出并脱敏公开 POI/影像 chunk 后，可在本地比较纯向量检索：
+
+```bash
+export ARK_API_KEY=...
+uv run timecampus-agent embedding-benchmark
+```
+
+默认比较 `all-minilm:l6-v2`、`embeddinggemma:300m`、`bge-m3:latest` 和
+`doubao-embedding-vision-251215`，输出到 `eval-reports/embedding/`。API Key、
+评论、媒体访问 Token 和原始 Qdrant 向量不会写入数据集或报告。
+
 可选 LLM-as-judge：
 
 ```env
@@ -172,13 +185,3 @@ uv run timecampus-agent eval run --suite all --mode fixture --repetitions 2 --re
 cd ..\TimeCampus
 node tools\agent-smoke.mjs --dry-run
 ```
-
-## 相关文档
-
-- 项目功能规格：[../docs/functional-spec.md](../docs/functional-spec.md)
-- 项目技术规格：[../docs/technical-spec.md](../docs/technical-spec.md)
-- Python Agent 架构：[docs/python-agent.md](docs/python-agent.md)
-- Agent Stack 联调：[../docs/agent-stack.md](../docs/agent-stack.md)
-- Agent Evaluation：[../docs/agent-evaluation.md](../docs/agent-evaluation.md)
-- Backend MCP Server：[../TimeCampus-Backend/docs/mcp-server.md](../TimeCampus-Backend/docs/mcp-server.md)
-- 文档维护指南：[../docs/documentation-maintenance.md](../docs/documentation-maintenance.md)

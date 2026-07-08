@@ -11,3 +11,6 @@ build/
 htmlcov/
 eval-reports/
 data/
+*.md
+!README.md
+*_benchmark.py
