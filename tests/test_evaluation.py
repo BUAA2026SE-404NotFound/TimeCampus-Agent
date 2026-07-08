@@ -354,6 +354,43 @@ def test_operations_middleware_falls_back_when_tool_schema_call_fails() -> None:
     assert result["output"].endswith("Sources: timecampus://knowledge/buaa-history")
 
 
+def test_operations_middleware_streams_fallback_chunks() -> None:
+    async def exercise():
+        class Model:
+            async def complete(self, _messages, tools=None):
+                if tools:
+                    raise RuntimeError("tool schema rejected")
+                raise AssertionError("stream fallback should not call complete")
+
+            async def stream_complete(self, messages, tools=None):
+                assert tools is None
+                assert all(message["role"] != "tool" for message in messages)
+                yield "北航"
+                yield "校史"
+
+        async def rag(_arguments):
+            return '{"uri":"timecampus://knowledge/buaa-history"}'
+
+        agent = PurePythonOperationsAgent(
+            Model(),
+            [ToolSpec("timecampus_rag_search", "rag", {"type": "object", "properties": {}}, rag)],
+            "base",
+        )
+        return [
+            event
+            async for event in agent.stream_run(
+                [{"role": "user", "content": "给我讲一讲北航的历史沿革"}],
+                thread_id="thread-1",
+            )
+        ]
+
+    events = asyncio.run(exercise())
+
+    assert [data["content"] for event, data in events if event == "delta"][:2] == ["北航", "校史"]
+    result = next(data for event, data in events if event == "result")
+    assert result["output"].endswith("Sources: timecampus://knowledge/buaa-history")
+
+
 def test_operations_middleware_makes_bulk_first_turn_read_only() -> None:
     async def exercise():
         class Model:

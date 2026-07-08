@@ -167,8 +167,15 @@ class AgentRuntime:
             self._active_threads.add(thread_id)
             self._thread_sessions[thread_id] = session_id
             yield "session", self.sessions.summary(session_id)
-            result = await agent.run(messages, thread_id=thread_id)
-            async for event in self._result_events(session_id, result, title_task=title_task):
+            result = None
+            async for event, data in agent.stream_run(messages, thread_id=thread_id):
+                if event == "delta":
+                    yield event, data
+                elif event == "result":
+                    result = data
+            if result is None:
+                result = await agent.run(messages, thread_id=thread_id)
+            async for event in self._result_events(session_id, result, title_task=title_task, emit_delta=False):
                 yield event
 
     async def stream_resume(
@@ -198,9 +205,10 @@ class AgentRuntime:
         result: dict[str, Any],
         *,
         title_task: asyncio.Task[None] | None = None,
+        emit_delta: bool = True,
     ) -> AsyncIterator[tuple[str, Any]]:
         execution = self._execution(result)
-        if execution["output"]:
+        if emit_delta and execution["output"]:
             yield "delta", {"content": execution["output"]}
         self._persist_assistant(session_id, execution["output"])
         execution["sessionId"] = session_id

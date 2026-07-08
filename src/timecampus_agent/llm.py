@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -35,6 +37,20 @@ class ChatClient:
             response = await client.post(self.url, headers=self._headers(), json=payload)
             response.raise_for_status()
             return _message(response.json())
+
+    async def stream_complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[str]:
+        payload = {**self._payload(messages, tools), "stream": True}
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with client.stream("POST", self.url, headers=self._headers(), json=payload) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    chunk = _stream_content(line)
+                    if chunk:
+                        yield chunk
 
     def complete_sync(
         self,
@@ -82,6 +98,26 @@ def _message(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(message, dict):
         raise RuntimeError("Chat completion returned an invalid message.")
     return _normalize_message(message)
+
+
+def _stream_content(line: str) -> str | None:
+    if not line.startswith("data:"):
+        return None
+    data = line.removeprefix("data:").strip()
+    if not data or data == "[DONE]":
+        return None
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return None
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    delta = choices[0].get("delta")
+    if not isinstance(delta, dict):
+        return None
+    content = delta.get("content")
+    return content if isinstance(content, str) else None
 
 
 def _normalize_message(message: dict[str, Any]) -> dict[str, Any]:

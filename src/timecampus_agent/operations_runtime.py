@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from uuid import uuid4
 
@@ -128,6 +128,71 @@ class PurePythonOperationsAgent:
         output = "工具调用轮次过多，请缩小任务范围后重试。"
         turn_messages.append({"role": "assistant", "content": output})
         return _completed(thread_id, turn_messages, tool_events, output)
+
+    async def stream_run(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        thread_id: str,
+    ) -> AsyncIterator[tuple[str, Any]]:
+        user_text = _last_user_text(messages)
+        available = self._available_tools(user_text)
+        turn_messages: list[dict[str, Any]] = []
+        tool_events: list[dict[str, Any]] = []
+        await self._rag_first(user_text, turn_messages, tool_events)
+
+        for _ in range(MAX_AGENT_STEPS):
+            prompt_messages = [{"role": "system", "content": self._prompt(user_text)}, *messages, *turn_messages]
+            tools = [tool.openai_schema() for tool in available.values()]
+            try:
+                response = await self.model.complete(prompt_messages, tools)
+            except Exception:
+                async for event in self._stream_fallback(prompt_messages, turn_messages, tool_events, thread_id):
+                    yield event
+                return
+
+            turn_messages.append(response)
+            calls = _tool_calls(response)
+            if not calls:
+                output = _append_sources(_content_text(response.get("content")), turn_messages)
+                turn_messages[-1] = {**response, "content": output}
+                if output:
+                    yield "delta", {"content": output}
+                yield "result", _completed(thread_id, turn_messages, tool_events, output)
+                return
+
+            write_calls = [call for call in calls if _is_write_call(call, available)]
+            if len(write_calls) > MAX_WRITE_CALLS_PER_TURN:
+                output = "本轮包含超过 8 个写操作。请明确选择最多 8 个 POI，再分批生成待审批修改。"
+                turn_messages.append({"role": "assistant", "content": output})
+                yield "delta", {"content": output}
+                yield "result", _completed(thread_id, turn_messages, tool_events, output)
+                return
+            if write_calls:
+                yield "result", {
+                    "threadId": thread_id,
+                    "status": "approval_required",
+                    "messages": turn_messages,
+                    "pendingActions": [_pending_action(call, available[_tool_name(call)]) for call in write_calls],
+                    "toolEvents": tool_events,
+                    "output": _content_text(response.get("content")) or "等待管理员审批。",
+                    "pendingState": {
+                        "messages": [*messages, *turn_messages],
+                        "pendingToolCalls": write_calls,
+                    },
+                }
+                return
+
+            for call in calls:
+                message, event = await self._execute_tool_call(call, available)
+                turn_messages.append(message)
+                if event:
+                    tool_events.append(event)
+
+        output = "工具调用轮次过多，请缩小任务范围后重试。"
+        turn_messages.append({"role": "assistant", "content": output})
+        yield "delta", {"content": output}
+        yield "result", _completed(thread_id, turn_messages, tool_events, output)
 
     async def resume(
         self,
@@ -260,6 +325,32 @@ class PurePythonOperationsAgent:
                 raise
             # ponytail: keep read-only answers alive if the provider rejects MCP tool schemas.
             return await self.model.complete(_plain_messages(messages), None)
+
+    async def _stream_fallback(
+        self,
+        messages: list[dict[str, Any]],
+        turn_messages: list[dict[str, Any]],
+        tool_events: list[dict[str, Any]],
+        thread_id: str,
+    ) -> AsyncIterator[tuple[str, Any]]:
+        output = ""
+        plain_messages = _plain_messages(messages)
+        try:
+            async for chunk in self.model.stream_complete(plain_messages, None):
+                output += chunk
+                yield "delta", {"content": chunk}
+        except Exception:
+            if output:
+                raise
+            output = _content_text((await self.model.complete(plain_messages, None)).get("content"))
+            if output:
+                yield "delta", {"content": output}
+        completed = _append_sources(output, turn_messages)
+        suffix = completed.removeprefix(output)
+        if suffix:
+            yield "delta", {"content": suffix}
+        turn_messages.append({"role": "assistant", "content": completed})
+        yield "result", _completed(thread_id, turn_messages, tool_events, completed)
 
 
 def tool_policy(tools: list[Any]) -> tuple[list[Any], dict[str, Any]]:
